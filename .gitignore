@@ -1,0 +1,4 @@
+out/
+
+# A round report is a working document, never a shipped file.
+ROUND-REPORT*.md

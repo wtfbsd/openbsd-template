@@ -1,0 +1,21 @@
+# rc.conf.local — desktop profile fragment.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# This file is a FRAGMENT: build.sh appends it to the base
+# /etc/rc.conf.local, because OpenBSD has one rc.conf.local per root
+# (rc.conf(8)).
+#
+# rc.conf(8): a daemon runs when its <daemon>_flags variable is set to an
+# empty value; "<daemon>_flags=NO" disables it.
+#
+# The X server is started by xenodm(1): the daemon runs with its default
+# arguments. There is no display manager (no LightDM) and no Wayland
+# anywhere; the session itself is the Xfce session of the xfce package
+# (see etc/skel/.xsession and etc/skel/.xinitrc).
+xenodm_flags=
+
+# sshd is ENABLED by default on OpenBSD: rc.conf(8) of the base system
+# starts it. The desktop profile is a console system, so it is disabled
+# here. The installer is told the same (see the response file).
+sshd_flags=NO

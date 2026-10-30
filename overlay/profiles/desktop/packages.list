@@ -1,0 +1,14 @@
+# packages.list — desktop profile (X11 only).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One package name per line; '#' starts a comment. The list is merged with
+# overlay/base/packages.list by build.sh and installed by /install.site with
+# pkg_add(1).
+#
+# The desktop is the base Xenocara plus the xfce package: there is no
+# Wayland anywhere and no display manager package (no LightDM). The X
+# server is started with xenodm(1) through startx, and the session of the
+# operator's account is the Xfce session (see etc/skel/.xsession).
+
+xfce

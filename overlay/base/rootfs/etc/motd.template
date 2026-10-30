@@ -1,0 +1,9 @@
+@DISTRO_NAME@ — an overlay distribution on unmodified OpenBSD.
+
+@MOTD@
+
+  * The base system is stock OpenBSD: no patched source, no patched packages.
+  * This system was finished by a site set (install.site(5)): the installer
+    unpacked it over the new root and ran /install.site there.
+
+  Docs:    @BRAND_URL@

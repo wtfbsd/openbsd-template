@@ -1,0 +1,12 @@
+# packages.list — appliance profile (headless).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One package name per line; '#' starts a comment. The list is merged with
+# overlay/base/packages.list by build.sh and installed by /install.site with
+# pkg_add(1).
+#
+# Empty by design: the appliance is stock OpenBSD plus the overlay. Add one
+# package name per line to grow it, e.g.:
+#   curl
+#   jq

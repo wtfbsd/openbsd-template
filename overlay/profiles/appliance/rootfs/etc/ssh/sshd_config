@@ -1,0 +1,26 @@
+# sshd_config — appliance profile (headless, key-only access).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# OpenBSD's sshd_config(5) has an Include directive, but the appliance
+# profile ships a complete file: the hardened settings must not be lost
+# behind a fragment that a later change could drop.
+#
+# Access is key-only: no root login and no password logins. The operator
+# provisions the authorized key of the account the installer creates
+# (autoinstall(8), "Public ssh key for user").
+
+Port 22
+AddressFamily any
+
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+
+PermitRootLogin no
+PasswordAuthentication no
+PermitEmptyPasswords no
+
+UseDNS no
+
+Subsystem sftp /usr/libexec/sftp-server
