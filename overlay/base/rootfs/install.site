@@ -1,0 +1,168 @@
+#!/bin/sh
+#
+# install.site — the script the OpenBSD installer runs at the end of an
+# install.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# install.site(5): a site set is a gzip(1) compressed tar(1) archive rooted
+# in /; the installer unpacks it over the new root and, if /install.site
+# exists and is executable, runs it at the end of the install in a
+# chroot(8) based at the system's root. Everything below therefore runs
+# inside the NEW system, with the new root as /.
+#
+# What it does:
+#   1. makes sure the message of the day is in place,
+#   2. creates the ssh host keys (sshd does not start without them),
+#   3. adds the operator account to the wheel group, so doas(1) can make
+#      it root: doas.conf(5) grants the members of that group the right,
+#      and an account that is not in the group cannot use it. The
+#      response file of autoinstall(8) cannot ask for the groups of the
+#      account it creates, so it is done here. A failure here is
+#      recorded, not hidden: the script goes on with the packages and
+#      fails at the end.
+#   4. installs the profile's packages with pkg_add(1) — the installer has
+#      configured the network by now, and the package mirror comes from
+#      /etc/installurl (installurl(5)). A package that cannot be installed
+#      is named in the file of the failed packages, the message of the day
+#      says so, and the script exits non-zero: an install that dropped a
+#      package in silence is not an install that worked.
+#
+# It is idempotent: running it again re-creates what is missing and does
+# not touch anything else. The warnings of the message of the day are put
+# there once, so a second run does not repeat them.
+
+set -eu
+
+PKGLIST="/usr/local/share/@SLUG@/packages.list"
+# The file that names the packages that could not be installed, and the
+# message of the day the warning is appended to.
+FAILFILE='/etc/@SLUG@-pkg-failed'
+# The file that records that the operator account could not be added to
+# the wheel group: the account cannot become root with doas(1) until it
+# is in the group.
+WHEELFILE='/etc/@SLUG@-wheel-failed'
+MOTDFILE='/etc/motd'
+
+log() { printf 'install.site: %s\n' "$*"; }
+
+# The exit status of the script. A step that failed sets it to 1 and the
+# script goes on with the steps that come after it, so the operator sees
+# everything that went wrong: the script fails at the end.
+rc=0
+
+# motd_warn <marker> <warning> — the warning is put in the message of the
+# day once. The marker is a line of the warning: it is looked for in the
+# file, so a second run of the script does not put the same warning
+# there a second time.
+motd_warn() {
+	[ -f "$MOTDFILE" ] || return 0
+	if grep -qF "$1" "$MOTDFILE" 2> /dev/null; then
+		return 0
+	fi
+	{
+		printf '\n'
+		printf '%s\n' "$2"
+	} >> "$MOTDFILE" 2> /dev/null || true
+}
+
+# 1. message of the day
+if [ -f "$MOTDFILE" ]; then
+	chmod 644 "$MOTDFILE" || true
+fi
+
+# 2. ssh host keys
+if [ -x /usr/bin/ssh-keygen ]; then
+	/usr/bin/ssh-keygen -A > /dev/null 2>&1 || log 'ssh-keygen: could not create the host keys'
+fi
+
+# 3. the operator account is a member of wheel
+#
+# A failure here is not hidden: the account is not in the group, so it
+# cannot become root with doas(1). The marker and the message of the day
+# say so, the packages are still installed, and the script fails at the
+# end.
+wheel_failed() {
+	log 'usermod: the operator account cannot become root with doas(1)'
+	{
+		printf '# %s\n' "$WHEELFILE"
+		printf '# The operator account could not be added to the wheel\n'
+		printf '# group by install.site, so it cannot become root with\n'
+		printf '# doas(1). Add it by hand, then remove this file:\n'
+		printf '#\n'
+		printf '#   usermod -G wheel %s\n' '@USER@'
+		printf '#\n'
+		printf '%s\n' '@USER@'
+	} > "$WHEELFILE" 2> /dev/null \
+		|| log "usermod: could not write $WHEELFILE"
+	motd_warn '*** WARNING: the operator account is not in the wheel group.' \
+"*** WARNING: the operator account is not in the wheel group.
+*** It cannot become root with doas(1) until it is in the group."
+	rc=1
+}
+
+if [ -x /usr/sbin/usermod ]; then
+	if ! /usr/sbin/usermod -G wheel '@USER@'; then
+		log 'usermod: could not add the operator account to the wheel group'
+		wheel_failed
+	fi
+else
+	log 'usermod: not found: the operator account is not in the wheel group'
+	wheel_failed
+fi
+
+# 4. packages
+if [ -f "$PKGLIST" ]; then
+	pkgs=$(sed -e 's/[[:space:]]*#.*$//' \
+		-e 's/^[[:space:]]*//' \
+		-e 's/[[:space:]]*$//' "$PKGLIST" | grep -v '^$' | tr '\n' ' ' || true)
+	if [ -n "$pkgs" ]; then
+		log "installing packages: $pkgs"
+		# pkg_add(1): -I never asks questions (the install runs
+		# unattended), the packages are fetched from the mirror in
+		# /etc/installurl (installurl(5)). Every package is installed
+		# on its own: pkg_add reports the failure of a package and
+		# goes on with the next one, so its exit status alone does not
+		# say which packages failed. One call per package says it.
+		failed=''
+		failure_output=''
+		# shellcheck disable=SC2086
+		for p in $pkgs; do
+			if ! _out=$(pkg_add -I "$p" 2>&1); then
+				failed="$failed $p"
+				if [ -n "$_out" ]; then
+					failure_output="$failure_output$_out
+"
+				fi
+			fi
+		done
+		if [ -n "$failed" ]; then
+			log "pkg_add: these packages could not be installed:$failed"
+			{
+				printf '# %s\n' "$FAILFILE"
+				printf '# The packages below could not be installed by\n'
+				printf '# install.site. Install them by hand, then remove\n'
+				printf '# this file.\n'
+				for p in $failed; do printf '%s\n' "$p"; done
+				if [ -n "$failure_output" ]; then
+					printf '\n# the output of pkg_add(1):\n'
+					printf '%s\n' "$failure_output"
+				fi
+			} > "$FAILFILE" 2> /dev/null \
+				|| log "pkg_add: could not write $FAILFILE"
+			# the warning in the message of the day: the operator has
+			# to see it when they log in. It is put there once: the
+			# script is idempotent.
+			motd_warn "*** WARNING: the packages of $FAILFILE could not be installed." \
+"*** WARNING: the packages of $FAILFILE could not be installed.
+*** See $FAILFILE for the list of them."
+			rc=1
+		fi
+	fi
+fi
+
+if [ "$rc" -ne 0 ]; then
+	exit 1
+fi
+
+log 'done'

@@ -1,0 +1,14 @@
+# packages.list — packages installed on every ExampleBSD install.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One package name per line; '#' starts a comment. build.sh merges this list
+# with the profile's list into usr/local/share/<slug>/packages.list inside
+# the site set, and /install.site installs the result with pkg_add(1) once
+# the installer has brought the network up.
+#
+# The list is empty by design: a stock OpenBSD base system needs no
+# third-party package to be useful, and the packages of the base system
+# (packages(7)) are not installed with pkg_add(1).
+
+# (no base packages)

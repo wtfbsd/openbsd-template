@@ -1,0 +1,28 @@
+# examplebsd-openbsd-answers.yaml — the placeholder distribution, OpenBSD row.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The OpenBSD variant of the examplebsd answers: the same placeholder
+# distribution, built on the OpenBSD row of wtfbsd/agents questions.yaml
+# (per_os: openbsd, arch [amd64, aarch64], root_fs [ffs], installer [tui],
+# zfs_pool no).
+#
+# Format: flat `KEY: value` lines, the format of wtfbsd/agents
+# questions.yaml; scripts/apply-answers.sh turns them into product.conf.
+
+DISTRO_OS: openbsd
+DISTRO_NAME: ExampleBSD
+DISTRO_SLUG: examplebsd
+DISTRO_ARCH: amd64
+FILESYSTEM_ROOT: ffs
+ZFS_DATA_POOL: no
+PROFILE: appliance
+PACKAGE_SET: minimal
+INSTALLER: tui
+MOTD: ExampleBSD — the placeholder distribution of the wtfbsd templates
+BRAND_COLOR: 3b6ea5
+BRAND_URL: https://example.org
+CI_ENABLED: yes
+PUBLISH_METHOD: mcp
+PUBLISH_TARGET: example.org
+PUBLISHER_ORG: wtfbsd

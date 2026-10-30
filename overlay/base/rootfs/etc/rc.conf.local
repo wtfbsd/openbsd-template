@@ -1,0 +1,20 @@
+# rc.conf.local — OpenBSD daemon configuration (rc.conf(8)).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# rc.conf(8): /etc/rc.conf.local holds variable=value assignments that
+# override /etc/rc.conf; the file is read by rc(8) on every boot and every
+# time an rc.d(8) script is run. A daemon is enabled by setting its
+# <daemon>_flags variable to an empty value (it then runs with the default
+# arguments); "<daemon>_flags=NO" disables it.
+#
+# OpenBSD has no rc.conf.d: there is one rc.conf.local per root. The
+# profile overlay ships a FRAGMENT that build.sh appends to this file, so
+# the base settings live here and the profile settings in the fragment.
+#
+# The name of the host is NOT here: on OpenBSD it is /etc/myname (the
+# placeholder is substituted by build.sh).
+
+# Package daemons started at boot, in the order given (rc.conf(8),
+# pkg_scripts). The profile fragment adds the daemons it needs.
+pkg_scripts=""

@@ -1,0 +1,127 @@
+# install.conf.template — autoinstall(8) response file for ExampleBSD.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# autoinstall(8): the response file is a line oriented ASCII text file; each
+# line is "question = answer", where the question is an installer question
+# (without the question mark) or an unambiguous part of it. The installer
+# fetches install.conf over HTTP, or finds /auto_install.conf on the
+# install media.
+#
+# build.sh writes out/install.conf from this template: the placeholders are
+# substituted and the comment lines are stripped, so the generated file
+# holds answers only.
+#
+# The answers below are the ones autoinstall(8) documents itself. The disk
+# layout questions are release specific and are left to the operator (they
+# are marked UNVERIFIED below).
+
+# --- identity --------------------------------------------------------------
+
+System hostname = @SLUG@
+
+# --- passwords -------------------------------------------------------------
+#
+# 13 '*' characters disable password logins and leave only key based
+# access (autoinstall(8)).
+#
+# Password for root is always disabled: the root password is locked and
+# the operator account is the way in.
+Password for root = *************
+
+# Password for user is the password of the account the installer creates.
+# build.sh writes the bcrypt hash of that password here; the appliance
+# holds the 13 '*' characters above when the build was given no hash, so
+# the installer does not stop on the question.
+#
+# UNVERIFIED: autoinstall(8) does not document the wording of this
+# question. install.sub(8) asks "Password for user <name>?", and the key
+# below is the part of the question that does not carry the name of the
+# account; check it against the installer of the target release before you
+# rely on it.
+Password for user = @PASSHASH@
+
+# --- operator account ------------------------------------------------------
+#
+# The account the installer creates, and the public key that opens it.
+#
+# Both answers are build inputs: build.sh writes the account name (-u USER)
+# and the public key (-k PUBKEYFILE) here. The site set is key-only (the
+# sshd_config of the appliance refuses password logins and the root
+# password is locked), so without an account and a key nobody could log in.
+# A build without them is refused.
+
+Setup a user = @USER@
+Public ssh key for user = @PUBKEY@
+
+# --- the site set ----------------------------------------------------------
+#
+# The site set is built per product, so it is NOT in the SHA256.sig of the
+# release: the signature of the release covers the sets of the release, not
+# the overlay of a product. The installer stops at the verification question
+# when a set is not signed, so the response file has to answer it.
+#
+# UNVERIFIED: autoinstall(8) does not document the wording of these two
+# questions. They are written the way the installer of OpenBSD 7.8 asks
+# them; check them against the installer of the target release before you
+# rely on them.
+
+Continue without verification = yes
+Set name(s) = +site*
+
+# --- timezone --------------------------------------------------------------
+
+What timezone are you in = UTC
+
+# --- where the sets come from ----------------------------------------------
+#
+# The installer fetches the sets (and the site set) over HTTP. Point these
+# two lines at the server that serves them; the CI rewrites them for its
+# own server.
+
+Location of sets = http
+HTTP Server = sets.example.org
+
+# --- the appliance profile -------------------------------------------------
+#
+# The appliance boots to a serial console, and boot.conf(8) sets the same
+# console for the installed system. The desktop keeps the console of the
+# machine it runs on, so these answers belong to the appliance alone.
+
+#@profile appliance
+Change the default console to com0 = yes
+Which speed should com0 use = 115200
+#@endprofile
+
+# --- the desktop profile ---------------------------------------------------
+#
+# The answers of the desktop profile: build.sh keeps the block of the
+# profile it builds and drops the blocks of the others.
+#
+# UNVERIFIED: autoinstall(8) does not document the wording of these two
+# questions. They are written the way the installer of OpenBSD 7.8 asks
+# them; check them against the installer of the target release before you
+# rely on them.
+#
+# The X server is started by xenodm(1) (see the rc.conf.local fragment of
+# the profile), and sshd is not started: OpenBSD enables it by default and
+# the desktop is a console system.
+
+#@profile desktop
+Do you want the X Window System to be started by xenodm(1) = yes
+Start sshd(8) by default = no
+#@endprofile
+
+# --- disk layout -----------------------------------------------------------
+#
+# UNVERIFIED: the exact wording of the disk and partition questions depends
+# on the release and on the installer script. Check them against the
+# installer of the target release (or the "URL to autopartitioning
+# template for disklabel" answer of autoinstall(8)) before using them.
+
+#Which disk should be used for the root filesystem? = sd0
+#Do you want to use the entire disk for the root filesystem? = yes
+#Which partition should be used for swap? = sd0b
+#Which partition should be used for /usr? = sd0a
+#Which partition should be used for /home? = sd0d
+#Which partition should be used for /var? = sd0e

@@ -1,0 +1,13 @@
+# rc.conf.local — appliance profile fragment.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# This file is a FRAGMENT: build.sh appends it to the base
+# /etc/rc.conf.local, because OpenBSD has one rc.conf.local per root
+# (rc.conf(8)).
+#
+# rc.conf(8): a daemon runs when its <daemon>_flags variable is set to an
+# empty value; "<daemon>_flags=NO" disables it. sshd is started with its
+# default arguments here; the appliance is key-only, see
+# etc/ssh/sshd_config.
+sshd_flags=
