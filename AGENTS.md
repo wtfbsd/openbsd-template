@@ -8,7 +8,7 @@ unmodified upstream OpenBSD**. The placeholders are **ExampleBSD** (slug
 
 The base system is never patched. The overlay becomes a **site set**
 (`install.site(5)`): a gzip(1) compressed tar(1) archive named
-`site${VERSION}.tgz` (`site78.tgz` for release 7.8), rooted in `/`, which
+`site${VERSION}.tgz` (`site80.tgz` for release 8.0), rooted in `/`, which
 the installer unpacks over the new root and then runs as `/install.site` in
 a chroot(8) based at that root. An unattended install is driven by
 `autoinstall(8)` with a response file (`question = answer` lines).
@@ -33,7 +33,7 @@ a chroot(8) based at that root. An unattended install is driven by
    owner override, so on OpenBSD the build refuses to run as a user other
    than root. The list of the files is read the way the `tar(1)` of the
    host reads it: `-I` on OpenBSD, `-T` with the GNU tar and the bsdtar.
-8. Every `rm -rf` in `build.sh` goes through the guard function of `build.sh`; the one documented exception is the Jenkinsfile, which removes the fixed path `./out` of its own workspace.
+8. Every `rm -rf` in `build.sh` goes through the guard function of `build.sh`; the documented exceptions are the Jenkinsfile, which removes the fixed paths `./out` and `media.iso` of its own workspace, and `ci/media.sh`, whose own `rmrf` guard removes the work directory of the run and refuses a path outside the spool of the media node.
 9. **No ZFS at all. FFS is the only filesystem choice.** The build refuses
    `FILESYSTEM_ROOT=zfs` and `ZFS_DATA_POOL=yes`.
 10. The mt76 wireless driver is never enabled, loaded, configured or even
@@ -71,16 +71,38 @@ a chroot(8) based at that root. An unattended install is driven by
 
 ```sh
 ./build.sh -c product.conf -n -u operator -k operator.pub   # dry run: writes nothing
-./build.sh -c product.conf -r 7.8 -u operator -k operator.pub # out/site78.tgz
-./build.sh -c product.conf -r 7.8 -u operator -k operator.pub -p both
-./build.sh -c product.conf -r 7.8 -u operator -k operator.pub -P pw.hash -p desktop
+./build.sh -c product.conf -r 8.0 -u operator -k operator.pub # out/site80.tgz
+./build.sh -c product.conf -r 8.0 -u operator -k operator.pub -p both
+./build.sh -c product.conf -r 8.0 -u operator -k operator.pub -P pw.hash -p desktop
 ```
 
 `product.conf` is parsed, never sourced: only the keys of wtfbsd/agents
-`questions.yaml` are accepted and a value with a shell metacharacter is
-refused. The base system itself is built with `release(8)` and only on
-OpenBSD (`WTFBSD_BUILD_BASE=yes`); the build refuses that path anywhere
-else.
+`questions.yaml` are accepted — the name, the slug, the architecture, the
+filesystem, the packages, the installer, the motd, the brand and the
+network (`NET_IF`, `NET_IPV4`, `NET_NETMASK`, `NET_GATEWAY`, `NET_DNS`
+and `DOMAIN`) — and a value with a shell metacharacter is refused. The
+base system itself is built with `release(8)` and only on OpenBSD
+(`WTFBSD_BUILD_BASE=yes`); the build refuses that path anywhere else.
+
+## The install media
+
+`ci/media.sh prepare IMAGE SITE_TGZ INSTALL_CONF RELEASE ARCH [OUT_IMAGE]`
+puts the site set and the response file into a copy of the stock install
+media (an ISO9660 image) and rebuilds it with `mkhybrid(8)`; it runs on
+OpenBSD, as root. The response file goes into the **root of the ramdisk of
+`bsd.rd`** (with `rdsetroot(8)`), never into the root of the CD. The
+release and the architecture are given, never guessed from the name of the
+site set and never read out of the environment. Every device is allocated
+by `vnconfig(8)` and every mount point lives under the work directory of
+the run, which is under the spool of the media node
+(`/var/spool/wtfbsd-media`, a constant of the helper: `doas(1)` resets the
+environment of the run, so the job and the helper cannot disagree on the
+directory). The helper runs as root and touches nothing outside that
+spool: the image, the site set, the response file, the image it writes and
+the work directory of the run are all inside it, none of them is a
+symbolic link and none of them holds a `..`. The CI runs the installed
+copy of the helper through `doas(1)`, never the copy of the workspace:
+`permit nopass <jenkins-user> as root cmd /usr/local/libexec/wtfbsd-media`.
 
 ## How to test
 

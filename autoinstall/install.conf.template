@@ -62,7 +62,7 @@ Public ssh key for user = @PUBKEY@
 # when a set is not signed, so the response file has to answer it.
 #
 # UNVERIFIED: autoinstall(8) does not document the wording of these two
-# questions. They are written the way the installer of OpenBSD 7.8 asks
+# questions. They are written the way the installer of OpenBSD 8.0 asks
 # them; check them against the installer of the target release before you
 # rely on them.
 
@@ -82,6 +82,35 @@ What timezone are you in = UTC
 Location of sets = http
 HTTP Server = sets.example.org
 
+# --- the network -----------------------------------------------------------
+#
+# The installer asks for the network when it brings the interface up.
+# Without an answer it asks the operator, and it aborts when there is no
+# DHCP at all: "Question has no answer in response file: default ipv4
+# route? (ipv4 address or 'none')".
+#
+# The answers below are the static setup of the product: build.sh keeps
+# them when the product.conf holds NET_IPV4, and drops them when it does
+# not. Without NET_IPV4 the interface is configured with DHCP, which is
+# what the answer "autoconf" means.
+#
+# The wording of the questions is the wording of the installer of
+# OpenBSD 8.0 (install.sub(8)); autoinstall(8) does not document it.
+
+#@if NET_STATIC
+Network interface to configure = @NET_IF@
+IPv4 address for @NET_IF@ = @NET_IPV4@
+Netmask for @NET_IF@ = @NET_NETMASK@
+IPv6 address for @NET_IF@ = none
+Default IPv4 route = @NET_GATEWAY@
+DNS nameservers = @NET_DNS@
+#@endif
+
+# The domain of the host: the name of the installed system is the name
+# of the host with the domain appended (etc/myname).
+
+DNS domain name = @DOMAIN@
+
 # --- the appliance profile -------------------------------------------------
 #
 # The appliance boots to a serial console, and boot.conf(8) sets the same
@@ -99,7 +128,7 @@ Which speed should com0 use = 115200
 # profile it builds and drops the blocks of the others.
 #
 # UNVERIFIED: autoinstall(8) does not document the wording of these two
-# questions. They are written the way the installer of OpenBSD 7.8 asks
+# questions. They are written the way the installer of OpenBSD 8.0 asks
 # them; check them against the installer of the target release before you
 # rely on them.
 #
