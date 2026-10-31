@@ -14,7 +14,7 @@
 #   install.conf  autoinstall(8) response file ("question = answer" lines).
 #   SHA256        checksums of the files above.
 #
-# NN is the release without the dot: 7.8 -> site78.tgz (install.site(5)).
+# NN is the release without the dot: 8.0 -> site80.tgz (install.site(5)).
 # The site set is named exactly like that because the installer looks for
 # site${VERSION}.tgz next to the sets; a host specific set would be
 # site${VERSION}-$(hostname -s).tgz.
@@ -27,7 +27,7 @@
 # wtfbsd/agents questions.yaml.
 #
 # Usage:
-#   ./build.sh -c product.conf [-r 7.8] [-o ./out] [-p desktop|appliance|both]
+#   ./build.sh -c product.conf [-r 8.0] [-o ./out] [-p desktop|appliance|both]
 #               [-u USER -k PUBKEYFILE] [-n]
 #
 # Environment knobs:
@@ -42,12 +42,12 @@ log() { printf '%s\n' "$*"; }
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 usage() {
-	log "usage: $PROG -c product.conf [-r 7.8] [-o ./out]"
+	log "usage: $PROG -c product.conf [-r 8.0] [-o ./out]"
 	log '       [-p desktop|appliance|both] [-u USER -k PUBKEYFILE] [-P HASHFILE] [-n]'
 	log ''
 	log '  -c  product.conf from wtfbsd/agents scripts/apply-answers.sh'
-	log '  -r  OpenBSD release the site set is built for (N.N, default 7.8);'
-	log '      7.8 produces site78.tgz (install.site(5))'
+	log '  -r  OpenBSD release the site set is built for (N.N, default 8.0);'
+	log '      8.0 produces site80.tgz (install.site(5))'
 	log '  -o  output directory (default: ./out)'
 	log '  -p  profile: desktop, appliance or both (default: product.conf PROFILE)'
 	log '  -u  name of the operator account the installer creates; required'
@@ -66,7 +66,7 @@ usage() {
 
 DRY=0
 CONF=''
-RELEASE=7.8
+RELEASE=8.0
 OUT=./out
 CHOSEN=''
 CIUSER=''
@@ -106,8 +106,17 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # fixtures use KEY="value".
 KNOWN_KEYS='DISTRO_OS DISTRO_NAME DISTRO_SLUG DISTRO_ARCH FILESYSTEM_ROOT
 ZFS_DATA_POOL ZFS_POOL_NAME PROFILE PACKAGE_SET INSTALLER MOTD BRAND_COLOR
-BRAND_URL CI_ENABLED PUBLISH_METHOD PUBLISH_TARGET PUBLISHER_ORG'
+BRAND_URL CI_ENABLED PUBLISH_METHOD PUBLISH_TARGET PUBLISHER_ORG
+NET_IF NET_IPV4 NET_NETMASK NET_GATEWAY NET_DNS DOMAIN'
 for _k in $KNOWN_KEYS; do unset "$_k"; done
+# The answers of the network are optional: they are empty when the
+# product.conf does not hold them.
+NET_IF=''
+NET_IPV4=''
+NET_NETMASK=''
+NET_GATEWAY=''
+NET_DNS=''
+DOMAIN=''
 while IFS= read -r _line || [ -n "$_line" ]; do
 	case $_line in '' | '#'*) continue ;; esac
 	case $_line in
@@ -153,6 +162,12 @@ while IFS= read -r _line || [ -n "$_line" ]; do
 	PUBLISH_METHOD) PUBLISH_METHOD=$_v ;;
 	PUBLISH_TARGET) PUBLISH_TARGET=$_v ;;
 	PUBLISHER_ORG) PUBLISHER_ORG=$_v ;;
+	NET_IF) NET_IF=$_v ;;
+	NET_IPV4) NET_IPV4=$_v ;;
+	NET_NETMASK) NET_NETMASK=$_v ;;
+	NET_GATEWAY) NET_GATEWAY=$_v ;;
+	NET_DNS) NET_DNS=$_v ;;
+	DOMAIN) DOMAIN=$_v ;;
 	esac
 done < "$CONF"
 
@@ -196,9 +211,131 @@ case ${DISTRO_NAME:-} in *[[:cntrl:]]*) die 'DISTRO_NAME contains control charac
 [ "$(printf %s "$DISTRO_NAME" | wc -c)" -le 64 ] || die 'DISTRO_NAME too long (max 64)'
 
 # The release the site set is built for: N.N. install.site(5) names the
-# set after the release without the dot: 7.8 -> site78.tgz.
-chk '^[0-9]+\.[0-9]+$' "$RELEASE" "release must be N.N, e.g. 7.8 (got: $RELEASE)"
+# set after the release without the dot: 8.0 -> site80.tgz.
+chk '^[0-9]+\.[0-9]+$' "$RELEASE" "release must be N.N, e.g. 8.0 (got: $RELEASE)"
 SITENUM=$(printf '%s' "$RELEASE" | tr -d '.')
+
+# --------------------------------------------------------------------------
+# the network of the install
+# --------------------------------------------------------------------------
+
+# The response file can answer the network questions of the installer.
+# Without the answers the installer asks the operator, and it aborts
+# when there is no DHCP at all: "Question has no answer in response file:
+# default ipv4 route? (ipv4 address or 'none')".
+#
+# The answers are optional: without NET_IPV4 the interface is configured
+# with DHCP (the answer "autoconf"), which is what a product.conf without
+# a network means.
+NETMODE=NET_DHCP
+DOMAIN=${DOMAIN:-example.org}
+
+# quad <value> — a dotted quad whose octets are 0..255. An octet with a
+# leading zero is refused: 010 is not 10, and it is not what the reader
+# of the answer means.
+quad() {
+	case $1 in
+	'' | *[!0-9.]* | .* | *. | *..*) return 1 ;;
+	esac
+	IFS=. read -r _quad1 _quad2 _quad3 _quad4 _quadrest << EOF
+$1
+EOF
+	[ -z "${_quadrest:-}" ] || return 1
+	for _octet in "$_quad1" "$_quad2" "$_quad3" "$_quad4"; do
+		case $_octet in
+		'' | *[!0-9]*) return 1 ;;
+		esac
+		[ "${#_octet}" -le 3 ] || return 1
+		if [ "${#_octet}" -gt 1 ]; then
+			case $_octet in
+			0*) return 1 ;;
+			esac
+		fi
+		[ "$_octet" -le 255 ] || return 1
+	done
+	return 0
+}
+
+# netmask <value> — the mask is a run of one bits followed by a run of
+# zero bits: 255.255.255.0, 255.255.240.0, 0.0.0.0 and 255.255.255.255
+# are masks, a mask with a hole is not one.
+netmask() {
+	quad "$1" || return 1
+	IFS=. read -r _mask1 _mask2 _mask3 _mask4 _maskrest << EOF
+$1
+EOF
+	[ -z "${_maskrest:-}" ] || return 1
+	_bits=''
+	for _octet in "$_mask1" "$_mask2" "$_mask3" "$_mask4"; do
+		_val=$_octet
+		_n=8
+		while [ "$_n" -gt 0 ]; do
+			_n=$((_n - 1))
+			if [ "$_val" -ge $((1 << _n)) ]; then
+				_bits="${_bits}1"
+				_val=$((_val - (1 << _n)))
+			else
+				_bits="${_bits}0"
+			fi
+		done
+	done
+	# the bits after the leading ones must be zeros
+	_rest=$_bits
+	while :; do
+		case $_rest in
+		1*)
+			_rest=${_rest#1}
+			;;
+		*) break ;;
+		esac
+	done
+	case $_rest in
+	*1*) return 1 ;;
+	esac
+	return 0
+}
+
+# dnslist <value> — a list of dotted quads, separated by spaces
+dnslist() {
+	[ -n "${1:-}" ] || return 1
+	# The list is split on the white space of the shell, with the
+	# pathname expansion off: a glob character of the answer stays a
+	# glob character and does not become the names of the files of the
+	# directory.
+	set -f
+	_count=0
+	for _server in $1; do
+		quad "$_server" || { set +f; return 1; }
+		_count=$((_count + 1))
+	done
+	set +f
+	[ "$_count" -gt 0 ] || return 1
+	return 0
+}
+
+if [ -n "${NET_IPV4:-}" ]; then
+	NETMODE=NET_STATIC
+	[ -n "${NET_IF:-}" ] || die 'NET_IPV4 is set: NET_IF is required (the interface to configure)'
+	[ -n "${NET_NETMASK:-}" ] || die 'NET_IPV4 is set: NET_NETMASK is required'
+	[ -n "${NET_GATEWAY:-}" ] || die 'NET_IPV4 is set: NET_GATEWAY is required'
+	[ -n "${NET_DNS:-}" ] || die 'NET_IPV4 is set: NET_DNS is required'
+	chk '^[a-z]+[0-9]+$' "$NET_IF" "NET_IF must be an interface name like em0 (got: $NET_IF)"
+	quad "$NET_IPV4" || die "NET_IPV4 must be a dotted quad, every octet 0-255 (got: $NET_IPV4)"
+	[ "$NET_IPV4" != 0.0.0.0 ] \
+		|| die 'NET_IPV4 must be the address of the interface, not the unspecified address 0.0.0.0'
+	netmask "$NET_NETMASK" \
+		|| die "NET_NETMASK must be a contiguous netmask, e.g. 255.255.255.0 (got: $NET_NETMASK)"
+	quad "$NET_GATEWAY" || die "NET_GATEWAY must be a dotted quad, every octet 0-255 (got: $NET_GATEWAY)"
+	[ "$NET_GATEWAY" != 0.0.0.0 ] \
+		|| die 'NET_GATEWAY must be the default route, not the unspecified address 0.0.0.0'
+	dnslist "$NET_DNS" || die "NET_DNS must be a list of dotted quads, every octet 0-255 (got: $NET_DNS)"
+else
+	case ${NET_IF:-}${NET_NETMASK:-}${NET_GATEWAY:-}${NET_DNS:-} in
+	'') ;;
+	*) die 'NET_IPV4 is not set: the answers of the network would be dropped; set NET_IPV4 or remove the other NET_ keys' ;;
+	esac
+fi
+chk '^[A-Za-z0-9][A-Za-z0-9.-]*$' "$DOMAIN" "DOMAIN must be a domain name (got: $DOMAIN)"
 
 chk '^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$' \
 	"${BRAND_COLOR:-3b6ea5}" 'BRAND_COLOR must be six hex digits'
@@ -407,21 +544,87 @@ sed_esc() { # escape a value for use inside a sed replacement
 	printf '%s' "$1" | sed -e 's/[\\&]/\\&/g'
 }
 
-conf_for_profile() { # conf_for_profile <template> <profile> — the answers of that profile
+conf_for_profile() { # conf_for_profile <template> <profile> <mode> — the answers of that profile
 	# A block of the template that belongs to another profile is dropped:
 	#   #@profile desktop
 	#   ... the answers of the desktop ...
 	#   #@endprofile
-	awk -v prof="$2" '
-		/^#@profile / {
-			inblock = 1
-			keep = 0
-			for (i = 2; i <= NF; i++) if ($i == prof) keep = 1
-			next
+	# A block that depends on the mode of the build is kept when the mode
+	# is the one of the block:
+	#   #@if NET_STATIC
+	#   ... the answers of that mode ...
+	#   #@endif
+	#
+	# The template is checked while it is read: an #@if without an
+	# #@endif, an #@endif without an #@if, an #@else outside an #@if, a
+	# second #@else in one #@if, a nested #@if, a #@profile without an
+	# #@endprofile, a #@endprofile without a #@profile, a #@profile
+	# inside an open #@if, a #@profile inside an open #@profile, an
+	# #@endprofile inside an #@if, an indented directive and an unknown
+	# directive are refused, and the message names the file and the
+	# line. The answers of a broken template would be the answers of
+	# half a template, and the installer asks the questions that are
+	# missing.
+	awk -v prof="$2" -v mode="$3" -v tmpl="$1" '
+		function fail(msg, line) {
+			failed = 1
+			printf "%s: line %d: %s\n", tmpl, line, msg | "cat >&2"
+			close("cat >&2")
+			exit 1
 		}
-		/^#@endprofile/ { inblock = 0; keep = 0; next }
+		/^[ \t]*#@/ {
+			# A directive is at the start of the line: an indented
+			# one is refused, so a directive that is an answer is
+			# never read as a directive.
+			if ($0 !~ /^#@/) fail("an indented directive: " $1, NR)
+			if ($1 == "#@if") {
+				if (inif) fail("a nested #@if", NR)
+				inif = 1
+				ifline = NR
+				ifkeep = 0
+				inelse = 0
+				for (i = 2; i <= NF; i++) if ($i == mode) ifkeep = 1
+				next
+			}
+			if ($1 == "#@else") {
+				if (!inif) fail("an #@else outside an #@if", NR)
+				if (inelse) fail("a second #@else in one #@if", NR)
+				inelse = 1
+				ifkeep = !ifkeep
+				next
+			}
+			if ($1 == "#@endif") {
+				if (!inif) fail("an #@endif without an #@if", NR)
+				inif = 0
+				ifkeep = 0
+				inelse = 0
+				next
+			}
+			if ($1 == "#@profile") {
+				if (inif) fail("a #@profile inside an open #@if", NR)
+				if (inblock) fail("a #@profile inside an open #@profile", NR)
+				inblock = 1
+				profileline = NR
+				keep = 0
+				for (i = 2; i <= NF; i++) if ($i == prof) keep = 1
+				next
+			}
+			if ($1 == "#@endprofile") {
+				if (inif) fail("an #@endprofile inside an open #@if", NR)
+				if (!inblock) fail("an #@endprofile without a #@profile", NR)
+				inblock = 0
+				keep = 0
+				next
+			}
+			fail("unknown directive: " $1, NR)
+		}
 		inblock && !keep { next }
+		inif && !ifkeep { next }
 		{ print }
+		END {
+			if (!failed && inif) fail("an #@if without an #@endif", ifline)
+			if (!failed && inblock) fail("a #@profile without an #@endprofile", profileline)
+		}
 	' "$1"
 }
 
@@ -491,7 +694,7 @@ abspath() { # abspath <path> — the absolute form of a path (the file may not e
 # otherwise keep the uid of the builder.
 if [ "$(tar_flavour)" = openbsd ] && [ "$(id -u)" != 0 ]; then
 	if [ "$DRY" -ne 1 ]; then
-		die 'the site set has to be owned by root: the tar(1) of OpenBSD has no owner override, so the build has to run as root'
+		die 'the site set has to be owned by root: the tar(1) of OpenBSD has no owner override, so the build has to run as root; build the site set on a FreeBSD or Linux node (the Build stage'"'"'s AGENT_LABEL); only the Media stage needs the OpenBSD node'
 	fi
 	log 'note: on OpenBSD the build has to run as root: the tar(1) has no owner override'
 fi
@@ -525,9 +728,9 @@ mk_subst() { # write the sed program under $OUT; pick a delimiter absent from va
 	SUBFILE="$OUT/.subst.sed"
 	d=''
 	for cand in '|' ',' ';' ':' '%'; do
-		case "$DISTRO_NAME$MOTD$DISTRO_SLUG$BRAND_URL$LOGIN_USER$LOGIN_KEY" in *"$cand"*) ;; *) d=$cand; break ;; esac
+		case "$DISTRO_NAME$MOTD$DISTRO_SLUG$BRAND_URL$LOGIN_USER$LOGIN_KEY$NET_IF$NET_IPV4$NET_NETMASK$NET_GATEWAY$NET_DNS$DOMAIN" in *"$cand"*) ;; *) d=$cand; break ;; esac
 	done
-	[ -n "$d" ] || die 'DISTRO_NAME/MOTD/DISTRO_SLUG/BRAND_URL/USER/PUBKEY contain every candidate sed delimiter (| , ; : %); remove one of those characters in product.conf'
+	[ -n "$d" ] || die 'DISTRO_NAME/MOTD/DISTRO_SLUG/BRAND_URL/USER/PUBKEY/NET_IF/NET_IPV4/NET_NETMASK/NET_GATEWAY/NET_DNS/DOMAIN contain every candidate sed delimiter (| , ; : %); remove one of those characters in product.conf'
 	{
 		printf 's%s@DISTRO_NAME@%s%s%sg\n' "$d" "$d" "$(sed_esc "$DISTRO_NAME")" "$d"
 		printf 's%s@MOTD@%s%s%sg\n' "$d" "$d" "$(sed_esc "$MOTD")" "$d"
@@ -535,6 +738,12 @@ mk_subst() { # write the sed program under $OUT; pick a delimiter absent from va
 		printf 's%s@BRAND_URL@%s%s%sg\n' "$d" "$d" "$(sed_esc "$BRAND_URL")" "$d"
 		printf 's%s@USER@%s%s%sg\n' "$d" "$d" "$(sed_esc "$LOGIN_USER")" "$d"
 		printf 's%s@PUBKEY@%s%s%sg\n' "$d" "$d" "$(sed_esc "$LOGIN_KEY")" "$d"
+		printf 's%s@NET_IF@%s%s%sg\n' "$d" "$d" "$(sed_esc "$NET_IF")" "$d"
+		printf 's%s@NET_IPV4@%s%s%sg\n' "$d" "$d" "$(sed_esc "$NET_IPV4")" "$d"
+		printf 's%s@NET_NETMASK@%s%s%sg\n' "$d" "$d" "$(sed_esc "$NET_NETMASK")" "$d"
+		printf 's%s@NET_GATEWAY@%s%s%sg\n' "$d" "$d" "$(sed_esc "$NET_GATEWAY")" "$d"
+		printf 's%s@NET_DNS@%s%s%sg\n' "$d" "$d" "$(sed_esc "$NET_DNS")" "$d"
+		printf 's%s@DOMAIN@%s%s%sg\n' "$d" "$d" "$(sed_esc "$DOMAIN")" "$d"
 	} > "$SUBFILE"
 }
 
@@ -735,14 +944,24 @@ build_profile() { # build_profile <profile> <outdir>
 	# The response file holds the hash of the password of the operator
 	# account: it is a secret. It is written with a umask of 077, so
 	# only the builder reads it.
+	# The answers of the template are read into a file of their own
+	# first: a template that is broken is refused, and the error of the
+	# reader is not swallowed by the pipeline of the substitutions.
+	_conf="$_od/.install.conf.raw"
+	if ! ( umask 077
+		conf_for_profile "$ROOT/autoinstall/install.conf.template" "$_p" "$NETMODE" > "$_conf" ); then
+		rm -f "$_conf"
+		die "the response file template of the profile $_p is not valid (see the message above)"
+	fi
 	( umask 077
-	  conf_for_profile "$ROOT/autoinstall/install.conf.template" "$_p" \
-		| sed -e 's/[[:space:]]*#.*$//' \
-			-e 's/^[[:space:]]*//' \
-			-e 's/[[:space:]]*$//' \
-		| grep -v '^$' \
-		| sed -f "$SUBFILE" \
-		| sed -f "$PWPROG" > "$_od/install.conf" )
+	  sed -e 's/[[:space:]]*#.*$//' \
+	    -e 's/^[[:space:]]*//' \
+	    -e 's/[[:space:]]*$//' \
+	    "$_conf" \
+	| grep -v '^$' \
+	| sed -f "$SUBFILE" \
+	| sed -f "$PWPROG" > "$_od/install.conf" )
+	rm -f "$_conf"
 	log "    + $_od/install.conf"
 
 	# The redacted copy of the response file: the value of the password
