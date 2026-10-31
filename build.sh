@@ -694,7 +694,7 @@ abspath() { # abspath <path> — the absolute form of a path (the file may not e
 # otherwise keep the uid of the builder.
 if [ "$(tar_flavour)" = openbsd ] && [ "$(id -u)" != 0 ]; then
 	if [ "$DRY" -ne 1 ]; then
-		die 'the site set has to be owned by root: the tar(1) of OpenBSD has no owner override, so the build has to run as root'
+		die 'the site set has to be owned by root: the tar(1) of OpenBSD has no owner override, so the build has to run as root; build the site set on a FreeBSD or Linux node (the Build stage'"'"'s AGENT_LABEL); only the Media stage needs the OpenBSD node'
 	fi
 	log 'note: on OpenBSD the build has to run as root: the tar(1) has no owner override'
 fi

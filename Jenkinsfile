@@ -55,17 +55,9 @@ pipeline {
 			defaultValue: '/usr/local/libexec/wtfbsd-media',
 			description: 'the media helper of the media node: a root owned copy of ci/media.sh, so the rule of doas.conf(5) names a file the account of the job cannot rewrite; it must be the path named in the permit line of doas.conf(5) on the media node, or doas(1) refuses the run')
 		string(
-			name: 'MEDIA_SPOOL',
-			defaultValue: '/var/spool/wtfbsd-media',
-			description: 'the spool directory of the media node: it must equal the path of the spool of the media helper (/var/spool/wtfbsd-media), the same constant in both')
-		string(
 			name: 'ARCH',
 			defaultValue: 'amd64',
 			description: 'the architecture of the sets of the media: the DISTRO_ARCH of product.conf (amd64 or aarch64)')
-		string(
-			name: 'STOCK_MEDIA',
-			defaultValue: '',
-			description: 'stock upstream install media: installNN.iso, an ISO9660 image (a disk image installNN.img is not supported); the media helper rebuilds it with the site set and the response file, and the media stage fails without it unless ALLOW_NO_BOOT_TEST says so')
 		string(
 			name: 'ALLOW_NO_BOOT_TEST',
 			defaultValue: '',
@@ -190,6 +182,10 @@ pipeline {
 					if [ -n "${OPERATOR_PASSWORD_HASH:-}" ]; then
 						set -- "$@" -P "$OPERATOR_PASSWORD_HASH"
 					fi
+					# The Build stage runs as the account of the job, on a
+					# FreeBSD or Linux node whose tar(1) sets the owner of
+					# the members (bsdtar --uid 0, GNU tar --owner=0): no
+					# root. Only the Media stage needs the OpenBSD node.
 					./build.sh "$@"
 					ls -l ./out
 				'''
@@ -217,15 +213,21 @@ pipeline {
 				}
 				sh '''
 					set -eu
-					if [ -z "$STOCK_MEDIA" ]; then
+					# The stock install image is not an input of the
+					# job: the media node holds it, root-owned, with the
+					# signed SHA256 file of its release, and the helper
+					# checks both. Without it the media is not prepared
+					# and the boot test cannot run.
+					nn=$(printf '%s' "$RELEASE" | tr -d '.')
+					stock="/usr/local/share/wtfbsd-media/install$nn.iso"
+					if [ ! -f "$stock" ]; then
 						if [ "${ALLOW_NO_BOOT_TEST:-no}" = yes ]; then
-							echo "STOCK_MEDIA is empty: the media is not prepared and the boot test is skipped (ALLOW_NO_BOOT_TEST=yes)"
+							echo "no stock image $stock on the media node: the media is not prepared and the boot test is skipped (ALLOW_NO_BOOT_TEST=yes)"
 							exit 0
 						fi
-						echo "STOCK_MEDIA is empty: the media cannot be prepared. Set STOCK_MEDIA, or set ALLOW_NO_BOOT_TEST=yes to accept a build without a boot test." >&2
+						echo "no stock image $stock on the media node: the media cannot be prepared. Install it as README.md says (The media stage), or set ALLOW_NO_BOOT_TEST=yes to accept a build without a boot test." >&2
 						exit 1
 					fi
-					[ -f "$STOCK_MEDIA" ] || { echo "no such media: $STOCK_MEDIA" >&2; exit 1; }
 					# The site set and the response file are named by
 					# the exact path the build writes them to: the
 					# profile appliance and the profile desktop write
@@ -237,52 +239,50 @@ pipeline {
 					both) outdir=./out/appliance ;;
 					*) echo "unknown profile: $PROFILE" >&2; exit 1 ;;
 					esac
-					sitename=site$(printf '%s' "$RELEASE" | tr -d '.').tgz
-					site="$outdir/$sitename"
-					conf="$outdir/install.conf"
-					[ -f "$site" ] || { echo "no site set: $site" >&2; exit 1; }
-					[ -f "$conf" ] || { echo "no response file: $conf" >&2; exit 1; }
-					# The helper runs as root and touches nothing
-					# outside the spool of the media node: the inputs
-					# go into it, the result comes out of it. The
-					# spool is the constant of the helper: doas(1)
-					# resets the environment of the run, so the two
-					# must agree on the directory.
-					spool=$MEDIA_SPOOL
-					[ "$spool" = /var/spool/wtfbsd-media ] || {
-						echo "the spool of the media node is the constant of the media helper: /var/spool/wtfbsd-media (got: $spool)" >&2
+					# The inputs of the helper are exactly two regular
+					# files, and they come on stdin, not on the command
+					# line: a ustar tar of site.tgz and install.conf.
+					# The tar(1) of OpenBSD writes pax by default, whose
+					# extended headers the helper refuses, so the format
+					# is named: -F ustar. No path of the job is passed
+					# to the helper.
+					inputs="$PWD/.wtfbsd-inputs"
+					rm -rf -- "$inputs"
+					mkdir -p "$inputs"
+					# the build names the site set after the release
+					# (site80.tgz); the helper reads it as site.tgz
+					cp "$outdir/site$nn.tgz" "$inputs/site.tgz" \
+						|| { echo "cannot stage the site set" >&2; exit 1; }
+					cp "$outdir/install.conf" "$inputs/install.conf" \
+						|| { echo "cannot stage the response file" >&2; exit 1; }
+					tar -c -F ustar -f inputs.tar -C "$inputs" site.tgz install.conf \
+						|| { echo "cannot build inputs.tar" >&2; exit 1; }
+					# The image comes out of the helper on stdout. It
+					# is written to a temporary file first, and renamed
+					# only after the run succeeded, so a failed run
+					# leaves no image behind.
+					# The helper runs as root: the media node grants it
+					# with doas.conf(5), and the rule names the installed
+					# copy of the helper, a file the account of the job
+					# cannot rewrite.
+					[ -x "$MEDIA_HELPER" ] || {
+						echo "the media helper is missing on the media node: $MEDIA_HELPER (install it with: install -o root -g wheel -m 0555 ci/media.sh $MEDIA_HELPER) and set MEDIA_HELPER to its path" >&2
 						exit 1
 					}
-					[ -d "$spool" ] || { echo "no spool directory: $spool (create it on the media node: install -d -o root -g <job-group> -m 0770 $spool)" >&2; exit 1; }
-					spool_media="$spool/image.iso"
-					spool_site="$spool/$sitename"
-					spool_conf="$spool/install.conf"
-					spool_out="$spool/media.iso"
-					# The copies of the spool go when the stage ends,
-					# also when a signal stops it: a trap on EXIT
-					# alone is not run when the stage is killed.
+					# The copies of the workspace go when the stage ends,
+					# also when a signal stops it: a trap on EXIT alone
+					# is not run when the stage is killed.
 					cleanup() {
-						rm -f -- "$spool_media" "$spool_site" "$spool_conf" "$spool_out"
+						rm -rf -- "$inputs"
+						rm -f -- inputs.tar media.iso.tmp
 					}
 					trap 'cleanup' EXIT
 					trap 'exit 129' HUP
 					trap 'exit 130' INT
 					trap 'exit 143' TERM
-					cp "$STOCK_MEDIA" "$spool_media"
-					cp "$site" "$spool_site"
-					cp "$conf" "$spool_conf"
-					# The media helper changes the ramdisk of bsd.rd and
-					# rebuilds the image: it needs root, and the media
-					# node grants it with doas.conf(5). The rule names
-					# the installed copy of the helper: a file the
-					# account of the job cannot rewrite.
-					[ -x "$MEDIA_HELPER" ] || {
-						echo "the media helper is missing on the media node: $MEDIA_HELPER (install it with: install -o root -g wheel -m 0555 ci/media.sh $MEDIA_HELPER)" >&2
-						exit 1
-					}
-					doas "$MEDIA_HELPER" prepare "$spool_media" "$spool_site" \
-						"$spool_conf" "$RELEASE" "$ARCH" "$spool_out"
-					cp "$spool_out" media.iso
+					doas "$MEDIA_HELPER" prepare "$RELEASE" "$ARCH" \
+						< inputs.tar > media.iso.tmp \
+						&& mv media.iso.tmp media.iso
 				'''
 				script {
 					// The boot test runs on another node: the image

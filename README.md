@@ -83,7 +83,8 @@ License: BSD-2-Clause (see `LICENSE`).
   directory to `/etc`, `/usr` and the rest of that root. The `tar(1)` of
   OpenBSD has no owner override at all, so **on OpenBSD the build refuses
   to run as a user other than root**: the members would otherwise keep the
-  uid of the builder.
+  uid of the builder. Build the site set on a FreeBSD or Linux node (the
+  `AGENT_LABEL` of the Build stage); only the Media stage needs OpenBSD.
 - The list of the files is spelled the way the `tar(1)` of the host reads
   it: `-I` on OpenBSD, `-T` with the GNU tar and the bsdtar. The build
   picks the flavour of the host itself and never guesses.
@@ -295,14 +296,18 @@ ignored, and the installer waits at the `(I)nstall/(A)utoinstall` prompt.
 `ci/media.sh` runs on **OpenBSD, as root**: it mounts the image with
 `vnconfig(8)` and `mount(8)`, changes the ramdisk with `rdsetroot(8)`,
 rebuilds the image with `mkhybrid(8)` and refuses to run anywhere else.
-The image it takes is an ISO9660 image (`installNN.iso`): it is read-only,
-so the tree is copied out of it, the site set and the response file are put
-into the copy, and the image is rebuilt from the copy.
+The image it takes is the stock ISO9660 image of the release
+(`install80.iso`), which the media node holds (see
+[The stock image of the media node](#the-stock-image-of-the-media-node)):
+it is mounted read-only, its tree is copied out of it, the site set and
+the response file are put into the copy, and the image is rebuilt from
+the copy.
 
-The release and the architecture are arguments of the helper
-(`ci/media.sh prepare IMAGE SITE_TGZ INSTALL_CONF RELEASE ARCH`), and
-they are never guessed out of the name of the site set nor read out of
-the environment: `site100.tgz` is the site set of the release 10.0, not
+The release and the architecture are the only arguments of the helper
+(`ci/media.sh prepare RELEASE ARCH`): the two files of the run come on
+stdin as a tar, and the image comes back on stdout. They are never
+guessed out of the name of the site set nor read out of the environment:
+`site100.tgz` is the site set of the release 10.0, not
 of the release 1.00, and the architecture is the `DISTRO_ARCH` of the
 product (`amd64`, `aarch64`). A media without the sets of that release
 and that architecture is refused, and the refusal names both. A media
@@ -425,9 +430,7 @@ own (`MEDIA_AGENT_LABEL`, default `openbsd`).
 | `OPERATOR_PASSWORD_HASH` | the bcrypt hash of the password of that account (a file parameter); **required by the `desktop` profile**, optional for the `appliance` |
 | `VM_PROVIDER` | the VM provider (shipped: `bhyve`) |
 | `MEDIA_HELPER` | the media helper of the media node (default `/usr/local/libexec/wtfbsd-media`); it must be the path named in the permit line of `doas.conf(5)` on the media node, or `doas(1)` refuses the run |
-| `MEDIA_SPOOL` | the spool directory of the media node: it must equal the path of the spool of the media helper (the *spool of the media node* below) |
 | `ARCH` | the architecture of the sets of the media: the `DISTRO_ARCH` of `product.conf` (default `amd64`) |
-| `STOCK_MEDIA` | the stock upstream install media (`installNN.iso`, an ISO9660 image; a disk image `installNN.img` is not supported); without it the media stage **fails** unless `ALLOW_NO_BOOT_TEST` says so |
 | `ALLOW_NO_BOOT_TEST` | `yes` accepts a build without a boot test |
 | `BOOT_TIMEOUT` | seconds the boot test waits for the login prompt |
 
@@ -436,6 +439,18 @@ own (`MEDIA_AGENT_LABEL`, default `openbsd`).
 parameter does not land in the workspace of a Pipeline (JENKINS-27413):
 the pipeline unstashes it with `stashedFile(name: 'PRODUCT_CONF')` and
 `unstash 'PRODUCT_CONF'` before it reads it.
+
+### The build stage needs no root
+
+The **Build site set** stage runs `build.sh` as the account of the job on
+the node of `AGENT_LABEL`, a FreeBSD or Linux node: bsdtar
+(`--uid 0 --gid 0 --uname root --gname root`) and GNU tar
+(`--owner=0 --group=0 --numeric-owner`) set the owner of the members
+without root. The `tar(1)` of OpenBSD cannot, so `build.sh` refuses to run
+there as a user other than root; the pipeline never runs `build.sh` as
+root or through `doas(1)`. The OpenBSD node is only for the **Media**
+stage, and its one `doas.conf(5)` rule names the root-owned installed
+helper, never a file of the workspace.
 
 ### The media stage
 
@@ -448,11 +463,17 @@ The stage runs on the node of `MEDIA_AGENT_LABEL`. The site set and the
 response file come from the build stage with a stash, the media is
 prepared there, and the image travels to the boot test stage with
 another stash. The release and the architecture are given to the helper
-as arguments: `ci/media.sh prepare IMAGE SITE_TGZ INSTALL_CONF RELEASE
-ARCH OUT_IMAGE`, the release is `N.N` (`8.0`) and the architecture is
-the `DISTRO_ARCH` of the product (`amd64`, `aarch64`). They are never
-read out of the environment and never guessed out of the name of the
-site set.
+as arguments only: `ci/media.sh prepare RELEASE ARCH` — the release is
+`N.N` (`8.0`) and the architecture is the `DISTRO_ARCH` of the product
+(`amd64`, `aarch64`). They are never read out of the environment and
+never guessed out of the name of the site set.
+
+The inputs of the run are exactly two regular files, and they come on
+stdin, not on the command line: a POSIX `ustar` tar of `site.tgz` and
+`install.conf`. The stock install image is **not** an input of the job:
+the media node holds it (see below). The helper reads the input there,
+and the rebuilt image comes back on stdout. No path of the job is passed
+to the helper.
 
 The stage names the site set and the response file by the **exact path**
 the build writes them to: the profile `appliance` and the profile
@@ -489,44 +510,73 @@ owned by root and nobody else can rewrite it.
 The media node needs the copy to be up to date: reinstall it when
 `ci/media.sh` changes.
 
-#### The spool of the media node
+#### The stock image of the media node
 
-The helper runs as root, so it touches nothing outside the **spool
-directory** of the media node: `/var/spool/wtfbsd-media`. The path is a
-constant of the helper: `doas(1)` resets the environment of the run, so
-a value of the environment of the job would never reach the root run,
-and the job and the helper would not agree on the directory. The work
-directory of the run is under the spool too: the helper creates nothing
-outside it. The directory must exist, and it must not be writable by
-others: a directory another account can write is a directory another
-account can put a file in, and the helper would read that file as root.
-The spool belongs to root or to the account of the job, and the account
-of the job has to be able to write in it: it copies its inputs there.
-Either layout works: a spool of root with the mode `0770` and the group
-of the account of the job (`install -d -o root -g <job-group> -m 0770
-/var/spool/wtfbsd-media`), or a spool of the account of the job with the
-mode `0700`. A mode of `0750` is not enough: the group could not write
-the inputs into it.
-
-The helper refuses an image, a site set, a response file or an image it
-writes that is a symbolic link, that holds a `..` or that is not under
-the spool.
-
-The stage copies its inputs into the spool, runs the helper there and
-copies the result out:
+The media node holds the stock install image of each release it builds
+for, owned by root, next to the signed `SHA256` file of that release:
 
 ```
-cp "$STOCK_MEDIA" "$spool/image.iso"
-cp out/site80.tgz "$spool/site80.tgz"
-cp out/install.conf "$spool/install.conf"
-doas "$MEDIA_HELPER" prepare "$spool/image.iso" "$spool/site80.tgz" \
-	"$spool/install.conf" "$RELEASE" "$ARCH" "$spool/media.iso"
-cp "$spool/media.iso" media.iso
+/usr/local/share/wtfbsd-media/install80.iso
+/usr/local/share/wtfbsd-media/SHA256.8.0
 ```
 
-Nothing else is needed on the media node: the helper checks that the
-host is OpenBSD and that it runs as root, and it refuses to run
-anywhere else.
+The operator installs them once per release: fetch `install80.iso`
+and `SHA256.sig` from an OpenBSD mirror (`https://<mirror>/pub/OpenBSD/8.0/amd64/`),
+verify the image with `signify(1)`, and install the image and the
+signed `SHA256.sig` itself (the list signify checked, not a separately
+fetched `SHA256`) `root:wheel`, mode `0444`:
+
+```
+signify -C -p /etc/signify/openbsd-80-base.pub -x SHA256.sig install80.iso
+install -d -o root -g wheel -m 0755 /usr/local/share/wtfbsd-media
+install -o root -g wheel -m 0444 install80.iso /usr/local/share/wtfbsd-media/install80.iso
+install -o root -g wheel -m 0444 SHA256.sig /usr/local/share/wtfbsd-media/SHA256.8.0
+```
+
+The helper finds the image from the release (`8.0` → `install80.iso`).
+It refuses a run when the image or the `SHA256` file is missing, is a
+symbolic link, is not owned by root or is writable by the group or by
+others (the directory too), and it checks the sha256 of the image
+against the line `SHA256 (install80.iso) = <hex>` of the `SHA256` file
+before it attaches the image. It mounts the image `-o rdonly,nodev,nosuid`
+and refuses an image whose tree holds anything but regular files and
+directories (a symbolic link, a device, a fifo); before every read and
+write of the copy of the tree it refuses a path that is a symbolic link
+or whose directory resolves outside the copy.
+
+#### The inputs come on stdin and the image on stdout
+
+The helper creates its work directory as root with
+`mktemp -d /tmp/wtfbsd-media.XXXXXX` and checks that the path has that
+shape and that it is a directory owned by `root` with the mode `0700`.
+Every file and mount point of the run lives under it.
+
+The helper reads every 512-byte header of the input tar itself (with
+`dd(1)` and `od(1)`, never from the listing of `tar -t`) before it
+extracts anything: the type flag must be `0` or NUL (a regular file),
+extended headers (`x`, `g`, `L`, `K`) are refused, the name must be
+exactly `site.tgz` or `install.conf` (NUL-terminated, no prefix, no link
+name), each once, the magic must be `ustar\0` `00` and the checksum must
+match. After the extraction each file must be a regular file with one
+link. The caps: stdin 600 MB, `site.tgz` 512 MB, `install.conf` 64 KB.
+
+The stage builds the tar of the two members in the workspace and feeds
+it to the helper on stdin. It names the format, `-F ustar`: the `tar(1)`
+of OpenBSD writes pax by default ("the default format being pax"), and
+the helper refuses the extended header (type flag `x`) of pax. The helper writes the rebuilt image to
+`$WORK/out.iso` and then to stdout; the stage writes it to a temporary
+file first, and renames it only after the run succeeded, so a failed run
+leaves no image behind:
+
+```
+cp out/site80.tgz "$inputs/site.tgz"
+cp out/install.conf "$inputs/install.conf"
+tar -c -F ustar -f inputs.tar -C "$inputs" site.tgz install.conf
+doas "$MEDIA_HELPER" prepare "$RELEASE" "$ARCH" < inputs.tar > media.iso.tmp && mv media.iso.tmp media.iso
+```
+
+The helper checks that the host is OpenBSD and that it runs as root, and
+it refuses to run anywhere else.
 
 The boot test boots `media.iso`, the image the Media stage prepared,
 unattended through `autoinstall(8)`, then runs `tests/boot-test.sh`.
@@ -547,14 +597,15 @@ template is supposed to be proven, not a proof that it works.
 The stage needs **two** hosts, and a Jenkins that reaches both:
 
 - an **OpenBSD media host** (`MEDIA_AGENT_LABEL`): a machine that holds
-  the stock upstream install media (`installNN.iso`),
-  that holds the **installed copy** of `ci/media.sh` (`root:wheel`, mode
-  `0555`, at `/usr/local/libexec/wtfbsd-media`) and that holds the
-  **spool** of the media (the spool of the media node, not writable by
-  others). The pipeline does not download the
-  media; `STOCK_MEDIA` names the file that is already there. The
+  the stock install image of the release and its `SHA256` file under
+  `/usr/local/share/wtfbsd-media` (see
+  [The stock image of the media node](#the-stock-image-of-the-media-node))
+  and the **installed copy** of `ci/media.sh` (`root:wheel`, mode `0555`,
+  at `/usr/local/libexec/wtfbsd-media`). The pipeline does not download
+  the image. The
   **Media** stage prepares it there, and the **Boot test** stage boots
-  the image that comes back.
+  the image that comes back. The helper creates its own work directory
+  as root, so the host needs nothing else.
 - a **FreeBSD bhyve host** (`AGENT_LABEL`): a machine that runs
   `bhyve(8)`. The base system of FreeBSD has `bhyve(8)` and `bhyvectl(8)`,
   the UEFI firmware comes from the `edk2-bhyve` package, and the `nmdm`
@@ -564,7 +615,8 @@ Until the stage has run once against a real media and a real hypervisor,
 the suite of this repository proves the site set, the response file, the
 provider and the refusals of the build — and nothing more.
 
-A build without `STOCK_MEDIA` therefore **fails** in the media stage. The
+A build on a media node without the stock image therefore **fails** in
+the media stage. The
 documented opt-out, until the stage works, is `ALLOW_NO_BOOT_TEST=yes`:
 such a build accepts that the installed system was never booted, and it
 says so in its log. Nothing else is a substitute for a boot test.

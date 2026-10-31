@@ -484,6 +484,9 @@ else
 	fi
 	grep -qi 'has to run as root' "$work/osbsd.log" 2> /dev/null \
 		&& ok 'the refusal names root' || no 'the refusal names root'
+	grep -q "build the site set on a FreeBSD or Linux node (the Build stage's AGENT_LABEL); only the Media stage needs the OpenBSD node" "$work/osbsd.log" 2> /dev/null \
+		&& ok 'the refusal says to build on a FreeBSD or Linux node, and that only the Media stage needs OpenBSD' \
+		|| no 'the refusal says to build on a FreeBSD or Linux node, and that only the Media stage needs OpenBSD'
 	[ ! -e "$work/out-osbsd" ] && ok 'the refused build wrote nothing' || no 'the refused build wrote nothing'
 fi
 
@@ -2283,43 +2286,66 @@ printf '== ci/media.sh and the boot test stage ==\n'
 
 MEDIA="$repo/ci/media.sh"
 
-# The spool of the media node is a constant of the helper: doas(1)
-# resets the environment of the run, so a value of the environment of
-# the job would never reach the root run, and the job and the helper
-# would not agree on the directory. The helper has no other way to name
-# it, and the test suite runs a copy of the helper whose constant is the
-# spool of the run.
-if grep -q '^SPOOL=/var/spool/wtfbsd-media$' "$MEDIA" 2> /dev/null \
-	&& ! grep -q 'WTFBSD_MEDIA_SPOOL' "$MEDIA" 2> /dev/null \
-	&& ! grep -q 'WTFBSD_MEDIA_GUARD' "$MEDIA" 2> /dev/null; then
-	ok 'the media helper uses the constant spool of the media node'
+# The helper runs as root on the media node, through doas(1), which
+# resets the environment: the directory of the stock images and the caps
+# are constants of the helper. The suite runs copies of the helper whose
+# constants point at the fixtures of the suite.
+if grep -q '^STOCK_DIR=/usr/local/share/wtfbsd-media$' "$MEDIA" 2> /dev/null \
+	&& ! grep -q 'WTFBSD_MEDIA_STOCK\|WTFBSD_MEDIA_SPOOL\|STOCK_MEDIA' "$MEDIA" 2> /dev/null; then
+	ok 'the media helper uses the constant stock directory of the media node'
 else
-	no 'the media helper uses the constant spool of the media node'
+	no 'the media helper uses the constant stock directory of the media node'
+fi
+if grep -q 'mkdtemp' "$MEDIA" 2> /dev/null; then
+	no 'the media helper makes its work directory with mktemp -d only'
+else
+	ok 'the media helper makes its work directory with mktemp -d only'
+fi
+# OpenBSD tar (pax) lists a hard link with a leading '-' and ' == target',
+# GNU tar with an 'h': a listing proves nothing, so the helper reads the
+# header bytes and never lists the input.
+if grep -Eq 'tar +-[A-Za-z]*t' "$MEDIA" 2> /dev/null; then
+	no 'the media helper never reads the listing of tar -t'
+else
+	ok 'the media helper never reads the listing of tar -t'
 fi
 
-# media_copy <name> <spool> — a copy of the helper whose spool constant
-# is the spool of the run.
+# media_copy <name> <stock dir> [<in max> <site max> <conf max>] — a copy
+# of the helper whose constants are the fixtures of the suite
 media_copy() {
-	sed "s|^SPOOL=/var/spool/wtfbsd-media\$|SPOOL=$2|" "$MEDIA" > "$work/media-$1.sh"
+	sed -e "s|^STOCK_DIR=/usr/local/share/wtfbsd-media\$|STOCK_DIR=$2|" \
+		-e "s|^IN_MAX=629145600\$|IN_MAX=${3:-629145600}|" \
+		-e "s|^SITE_MAX=536870912\$|SITE_MAX=${4:-536870912}|" \
+		-e "s|^CONF_MAX=65536\$|CONF_MAX=${5:-65536}|" \
+		"$MEDIA" > "$work/media-$1.sh"
 	printf '%s' "$work/media-$1.sh"
 }
 
-MEDIA_RUN=$(media_copy run "$work/spool")
-MEDIA_RUN_NOSPOOL=$(media_copy nospool "$work/no-such-spool")
-MEDIA_RUN_OPEN=$(media_copy open "$work/spool-open")
-MEDIA_RUN_SIGNAL=$(media_copy signal "$work/spool-signal")
-MEDIA_RUN_SIGNAL_FAIL=$(media_copy signal-fail "$work/spool-signal-fail")
-MEDIA_RUN_UMOUNT=$(media_copy umount "$work/spool-umount")
+# sha_of <file> — the sha256 of a file, in hex (sha256sum or sha256 -q)
+sha_of() {
+	if command -v sha256sum > /dev/null 2>&1; then
+		sha256sum "$1" | awk '{ print $1 }'
+	else
+		sha256 -q "$1"
+	fi
+}
 
-# The media helper changes the ramdisk of bsd.rd and rebuilds the image
-# with mkhybrid(8): the tools of OpenBSD. They are replaced by stubs that
-# log their arguments and create the files the real tools would create,
-# so the helper runs in the test suite without root and without a real
-# image.
+# rm_workdir <path> — remove a work directory the helper left behind (a
+# run that ended with a mount up); only a path of the shape of the helper
+rm_workdir() {
+	case ${1:-} in
+	/tmp/wtfbsd-media.??????) [ -d "$1" ] && rm -rf -- "$1" ;;
+	*) printf 'rm_workdir: refusing %s\n' "${1:-<empty>}" >&2 ;;
+	esac
+	return 0
+}
+
+# The tools of OpenBSD are stubbed: each stub logs its argv to
+# $WTFBSD_TEST_ARGV and does what the real tool does to the files. tar(1),
+# dd(1), od(1), find(1) and cp(1) are the real ones.
 _mstub=$work/mediastub
 mkdir -p "$_mstub"
-_mlog=$work/media-argv.log
-: > "$_mlog"
+_uid=$(id -u)
 
 cat > "$_mstub/uname" <<'STUB'
 #!/bin/sh
@@ -2333,28 +2359,80 @@ printf 'id %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
 printf '0\n'
 STUB
 
-# vnconfig(8) allocates a free unit and prints the name of it. The
-# counter is per run, so the units of two runs of the helper never mix,
-# and the nth attach can be made to fail. The list of the devices
-# (vnconfig -l) shows the units that are in use and the units that are
-# not: the lines of a unit that is in use look like
-#   vnd0: covering /path/to/image on sd0a, inode 12345
-# and an unused unit prints
+# mktemp(1): the real one, under /tmp, as the helper asks; the knobs make
+# it hand back a directory of another shape or another mode
+cat > "$_mstub/mktemp" <<'STUB'
+#!/bin/sh
+printf 'mktemp %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
+if [ -n "${WTFBSD_TEST_MKTEMP_FAKE:-}" ]; then
+	mkdir -p "$WTFBSD_TEST_MKTEMP_FAKE"
+	printf '%s\n' "$WTFBSD_TEST_MKTEMP_FAKE"
+	exit 0
+fi
+_d=$(command -p mktemp "$@") || exit 1
+printf '%s\n' "$_d" >> "${WTFBSD_TEST_MKDLOG:-/dev/null}"
+[ -z "${WTFBSD_TEST_MKTEMP_MODE:-}" ] || chmod "$WTFBSD_TEST_MKTEMP_MODE" "$_d"
+printf '%s\n' "$_d"
+STUB
+
+# stat(1) of OpenBSD: stat -f %u|%Lp|%l|%z FILE. The files of the suite
+# belong to the account that runs it, which stands in for root; a path
+# that matches $WTFBSD_TEST_STAT_FOREIGN belongs to another account.
+cat > "$_mstub/stat" <<'STUB'
+#!/bin/sh
+[ "${1:-}" = -f ] || exit 2
+_fmt=$2
+_f=$3
+if command -p stat -c %u / > /dev/null 2>&1; then
+	case $_fmt in
+	%u) _g=%u ;;
+	%Lp) _g=%a ;;
+	%l) _g=%h ;;
+	%z) _g=%s ;;
+	*) exit 2 ;;
+	esac
+	_v=$(command -p stat -c "$_g" -- "$_f") || exit 1
+else
+	_v=$(command -p stat -f "$_fmt" -- "$_f") || exit 1
+fi
+if [ "$_fmt" = %u ] && [ "$_v" = "$WTFBSD_TEST_UID" ]; then
+	_v=0
+	case $_f in
+	${WTFBSD_TEST_STAT_FOREIGN:-/nonexistent/none}) _v=4242 ;;
+	esac
+fi
+printf '%s\n' "$_v"
+STUB
+
+# sha256(1) of OpenBSD: sha256 -q FILE prints the hex digest only
+cat > "$_mstub/sha256" <<'STUB'
+#!/bin/sh
+printf 'sha256 %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
+[ "${1:-}" = -q ] || exit 2
+if command -p sha256sum "$2" > /dev/null 2>&1; then
+	command -p sha256sum "$2" | awk '{ print $1 }'
+else
+	command -p sha256 -q "$2"
+fi
+STUB
+
+# vnconfig(8): the list (vnconfig -l) prints the lines of the real tool,
+#   vnd0: covering /path/to/image on sd0d, inode 3
 #   vnd1: not in use
+# and an attach prints the unit it allocated (vnd0, then vnd1). The knobs
+# make an attach sleep (to signal the run in the middle of it) or fail.
 cat > "$_mstub/vnconfig" <<'STUB'
 #!/bin/sh
 printf 'vnconfig %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
 _state=${WTFBSD_TEST_VND_STATE:-/dev/null}
 case ${1:-} in
 -l)
-	_max=0
-	if [ -f "$_state" ]; then
-		awk '{ p = substr($0, index($0, " ") + 1); printf "%s: covering %s on sd%sa, inode 12345\n", $1, p, substr($1, 4) }' "$_state"
-		_max=$(awk '{ n = substr($1, 4) + 0; if (n > m) m = n } END { print m + 0 }' "$_state")
-	fi
 	_i=0
-	while [ "$_i" -le "$_max" ]; do
-		if ! awk -v u="vnd$_i" '$1 == u { found = 1 } END { exit found ? 0 : 1 }' "$_state" 2> /dev/null; then
+	while [ "$_i" -le 3 ]; do
+		_p=$(awk -v u="vnd$_i" '$1 == u { print substr($0, index($0, " ") + 1); exit }' "$_state" 2> /dev/null)
+		if [ -n "$_p" ]; then
+			printf 'vnd%s: covering %s on sd0d, inode 3\n' "$_i" "$_p"
+		else
 			printf 'vnd%s: not in use\n' "$_i"
 		fi
 		_i=$((_i + 1))
@@ -2362,7 +2440,6 @@ case ${1:-} in
 	exit 0
 	;;
 -u)
-	# the detach of a device: the unit is not in use any more
 	if [ -f "$_state" ]; then
 		awk -v u="${2:-}" '$1 != u' "$_state" > "$_state.tmp" 2> /dev/null || : > "$_state.tmp"
 		mv "$_state.tmp" "$_state" 2> /dev/null || true
@@ -2370,6 +2447,7 @@ case ${1:-} in
 	exit 0
 	;;
 esac
+if [ -n "${WTFBSD_TEST_VND_SLEEP:-}" ]; then sleep "$WTFBSD_TEST_VND_SLEEP"; fi
 _n=$(cat "${WTFBSD_TEST_VND_COUNT:-/dev/null}" 2> /dev/null || echo 0)
 case $_n in '' | *[!0-9]*) _n=0 ;; esac
 _next=$((_n + 1))
@@ -2377,15 +2455,16 @@ if [ "${WTFBSD_TEST_VND_FAIL_ON:-0}" = "$_next" ]; then
 	printf 'vnconfig: cannot attach\n' >&2
 	exit 1
 fi
-printf 'vnd%s\n' "$_n"
 printf '%s\n' "$_next" > "${WTFBSD_TEST_VND_COUNT:-/dev/null}" 2> /dev/null || true
-# the unit is in use: the list of the devices shows the image it covers
 if [ -n "${WTFBSD_TEST_VND_STATE:-}" ]; then
-	printf '%s %s\n' "vnd$_n" "$1" >> "${WTFBSD_TEST_VND_STATE}"
+	printf '%s %s\n' "vnd$_n" "$1" >> "$WTFBSD_TEST_VND_STATE"
 fi
+printf 'vnd%s\n' "$_n"
 exit 0
 STUB
 
+# mount(8): the mount point shows the tree of the fixture image for a
+# cd9660 mount; the knobs make a mount fail or sleep
 cat > "$_mstub/mount" <<'STUB'
 #!/bin/sh
 printf 'mount %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
@@ -2402,8 +2481,6 @@ for _a in "$@"; do _mnt=$_a; done
 mkdir -p "$_mnt"
 case " $* " in
 *" cd9660 "*)
-	# the image holds a tree: the stub shows the tree of the prepared
-	# image on the mount point
 	if [ -n "${WTFBSD_TEST_ISO_TREE:-}" ] && [ -d "$WTFBSD_TEST_ISO_TREE" ]; then
 		cp -R "$WTFBSD_TEST_ISO_TREE/." "$_mnt/" 2> /dev/null
 	fi
@@ -2413,10 +2490,12 @@ if [ -n "${WTFBSD_TEST_MOUNT_SLEEP:-}" ]; then sleep "$WTFBSD_TEST_MOUNT_SLEEP";
 exit 0
 STUB
 
+# umount(8): the tree of the mount point is copied aside, because the work
+# directory is gone when the helper ends; the knob makes the unmount of a
+# mount point of that name fail
 cat > "$_mstub/umount" <<'STUB'
 #!/bin/sh
 printf 'umount %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
-# the knob: the unmount of a mount point of that name fails
 if [ -n "${WTFBSD_TEST_UMOUNT_FAIL:-}" ]; then
 	_b=$(basename -- "${1:-}")
 	if [ "$_b" = "$WTFBSD_TEST_UMOUNT_FAIL" ]; then
@@ -2424,9 +2503,6 @@ if [ -n "${WTFBSD_TEST_UMOUNT_FAIL:-}" ]; then
 		exit 1
 	fi
 fi
-# The tree of the mount point is copied aside: the work directory of the
-# run is gone when the helper ends, and the test suite reads the tree of
-# the mount point after that.
 if [ -n "${WTFBSD_TEST_UMOUNT_TREE:-}" ] && [ -d "${1:-}" ]; then
 	_b=$(basename -- "$1")
 	mkdir -p "$WTFBSD_TEST_UMOUNT_TREE/$_b"
@@ -2435,135 +2511,335 @@ fi
 exit 0
 STUB
 
+# rdsetroot(8): -x writes the ramdisk image; without -x the ramdisk image
+# is written back into the kernel, which then differs from the stock one
 cat > "$_mstub/rdsetroot" <<'STUB'
 #!/bin/sh
 printf 'rdsetroot %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
 if [ "${1:-}" = -x ]; then
-	# rdsetroot(8) -x builds the image of the ramdisk
-	: > "$2"
+	: > "$3"
+else
+	printf 'the ramdisk written back\n' >> "$1"
 fi
 exit 0
 STUB
 
+# gzip(1): logged, then the real gzip
 cat > "$_mstub/gzip" <<'STUB'
 #!/bin/sh
 printf 'gzip %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
-case ${1:-} in
--dc)
-	shift
-	cat "$@"
-	exit 0
-	;;
-esac
-# gzip(1) writes the compressed file next to the file it read, and
-# removes the file it read
-for _a in "$@"; do
-	case $_a in
-	-*) continue ;;
-	esac
-	cp "$_a" "$_a.gz" 2> /dev/null || : > "$_a.gz"
-	rm -f "$_a"
-done
-exit 0
+exec env PATH="$(command -p getconf PATH 2> /dev/null || printf /usr/bin:/bin)" gzip "$@"
 STUB
 
+# mkhybrid(8): the tree it is given (the last argument) is copied aside,
+# and the image is a file that names it
 cat > "$_mstub/mkhybrid" <<'STUB'
 #!/bin/sh
 printf 'mkhybrid %s\n' "$*" >> "$WTFBSD_TEST_ARGV"
 _out=''
 _prev=''
+_tree=''
 for _a in "$@"; do
 	if [ "$_prev" = -o ]; then _out=$_a; fi
 	_prev=$_a
+	_tree=$_a
 done
-# the tree it is given is the last argument
-_tree=''
-for _a in "$@"; do _tree=$_a; done
-if [ -d "$_tree" ]; then
-	find "$_tree" -type f >> "$WTFBSD_TEST_ARGV" 2> /dev/null
-	# the tree of the image is copied aside: the test suite reads the
-	# files the image was built from
-	if [ -n "${WTFBSD_TEST_MKHYBRID_TREE:-}" ]; then
-		mkdir -p "${WTFBSD_TEST_MKHYBRID_TREE}"
-		cp -R "$_tree/." "${WTFBSD_TEST_MKHYBRID_TREE}/" 2> /dev/null
-	fi
+if [ -d "$_tree" ] && [ -n "${WTFBSD_TEST_MKHYBRID_TREE:-}" ]; then
+	mkdir -p "$WTFBSD_TEST_MKHYBRID_TREE"
+	cp -R "$_tree/." "$WTFBSD_TEST_MKHYBRID_TREE/" 2> /dev/null
 fi
-if [ -n "$_out" ]; then
-	printf 'the image of mkhybrid\n' > "$_out"
-fi
+[ -z "$_out" ] || printf 'the image of mkhybrid\n' > "$_out"
 exit 0
 STUB
 chmod +x "$_mstub"/*
 
-# The tree of the image: the directory of the release holds the sets and
-# the ramdisk. The names are the raw ones: the boot loader opens
-# cd0a:/8.0/amd64/bsd.rd by its name. The media of a release holds the
-# EFI boot file of the release (eficdboot) and no index.txt.
-_isotree=$work/isotree
-mkdir -p "$_isotree/8.0/amd64"
-printf 'the ramdisk of the release\n' > "$work/ramdisk.src"
-gzip -c "$work/ramdisk.src" > "$_isotree/8.0/amd64/bsd.rd"
-printf 'the boot catalog\n' > "$_isotree/8.0/amd64/cdbr"
-printf 'the catalog\n' > "$_isotree/8.0/amd64/boot.catalog"
-printf 'the efi boot file\n' > "$_isotree/8.0/amd64/eficdboot"
+# --- the input tar, built byte by byte -----------------------------------
+#
+# The ustar header of POSIX pax(1) (and tar(5)): 512 bytes, name at 0
+# (100), mode 100 (8), uid 108 (8), gid 116 (8), size 124 (12: 11 octal
+# digits and a NUL), mtime 136 (12), chksum 148 (8: 6 octal digits, a NUL
+# and a space, summed over the header with the field as 8 spaces),
+# typeflag 156, linkname 157 (100), magic "ustar\0" 257, version "00"
+# 263, prefix 345 (155). The data follows, padded to 512, and the archive
+# ends with two zero blocks. The headers are built here, so a test of a
+# type flag never depends on the tar of the host.
 
-# The spool of the media node: the helper runs as root and touches
-# nothing outside it. The image, the site set and the response file are
-# the inputs of the run.
-mkdir -p "$work/spool"
-: > "$work/spool/image.iso"
-: > "$work/spool/site80.tgz"
-printf 'Location of sets = http\nHTTP Server = sets.example.org\n' > "$work/spool/install.conf"
+# tar_put <file> <offset> <printf format> [args] — write bytes in place
+tar_put() {
+	_tpf=$1
+	_tpo=$2
+	shift 2
+	# shellcheck disable=SC2059
+	printf "$@" | dd of="$_tpf" bs=1 seek="$_tpo" conv=notrunc 2> /dev/null
+}
 
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$_mlog" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count" \
-	WTFBSD_TEST_UMOUNT_TREE="$work/tree" \
-	WTFBSD_TEST_MKHYBRID_TREE="$work/mkhybrid-tree" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-1" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media.log" 2>&1; then
-	ok 'the media helper prepares the media'
+# tar_hdr <out> <name format> <typeflag|''> <size> [<linkname>] [<prefix>]
+#         [ustar|gnu|none] [badsum] — append one header to <out>
+tar_hdr() {
+	_th=$work/tar-hdr
+	dd if=/dev/zero of="$_th" bs=512 count=1 2> /dev/null
+	tar_put "$_th" 0 "$2"
+	tar_put "$_th" 100 '%s' 0000644
+	tar_put "$_th" 108 '%s' 0001750
+	tar_put "$_th" 116 '%s' 0001750
+	tar_put "$_th" 124 '%011o' "$4"
+	tar_put "$_th" 136 '%011o' 1700000000
+	[ -z "$3" ] || tar_put "$_th" 156 '%s' "$3"
+	[ -z "${5:-}" ] || tar_put "$_th" 157 '%s' "$5"
+	case ${7:-ustar} in
+	ustar)
+		tar_put "$_th" 257 'ustar\000'
+		tar_put "$_th" 263 '%s' 00
+		;;
+	gnu) tar_put "$_th" 257 'ustar  \000' ;;
+	esac
+	[ -z "${6:-}" ] || tar_put "$_th" 345 '%s' "$6"
+	tar_put "$_th" 148 '%s' '        '
+	_ts=$(od -An -v -tu1 "$_th" | awk '{ for (i = 1; i <= NF; i++) s += $i } END { print s }')
+	[ -z "${8:-}" ] || _ts=$((_ts + 1))
+	tar_put "$_th" 148 '%06o\000 ' "$_ts"
+	cat "$_th" >> "$1"
+}
+# tar_data <out> <file> — append the data of a member, padded to 512
+tar_data() {
+	cat "$2" >> "$1"
+	_tds=$(wc -c < "$2" | tr -d ' ')
+	_tdp=$(((512 - _tds % 512) % 512))
+	[ "$_tdp" -eq 0 ] || dd if=/dev/zero bs=1 count="$_tdp" 2> /dev/null >> "$1"
+}
+# tar_file <out> <name> <file> — append a regular member
+tar_file() {
+	tar_hdr "$1" "$2" 0 "$(wc -c < "$3" | tr -d ' ')"
+	tar_data "$1" "$3"
+}
+# tar_end <out> — the two zero blocks of the end of the archive
+tar_end() {
+	dd if=/dev/zero bs=512 count=2 2> /dev/null >> "$1"
+}
+
+# The two inputs: a site set (a gzip file) and a response file.
+_staging=$work/staging
+mkdir -p "$_staging"
+printf 'the site set\n' | gzip -c > "$_staging/site.tgz"
+printf 'Location of sets = http\nHTTP Server = sets.example.org\nPathname to the sets = pub/OpenBSD\n' > "$_staging/install.conf"
+
+IN_OK=$work/in-ok.tar
+: > "$IN_OK"
+tar_file "$IN_OK" site.tgz "$_staging/site.tgz"
+tar_file "$IN_OK" install.conf "$_staging/install.conf"
+tar_end "$IN_OK"
+
+# The archive the suite builds is one tar(1) reads: the format is real.
+_lst=$(tar -tf "$IN_OK" 2> /dev/null | tr '\n' ' ')
+mkdir -p "$work/in-ok-x"
+if [ "$_lst" = 'site.tgz install.conf ' ] \
+	&& tar -xf "$IN_OK" -C "$work/in-ok-x" 2> /dev/null \
+	&& cmp -s "$work/in-ok-x/site.tgz" "$_staging/site.tgz" \
+	&& cmp -s "$work/in-ok-x/install.conf" "$_staging/install.conf"; then
+	ok 'the tar the suite builds byte by byte is read by tar(1)'
 else
-	no "the media helper prepares the media (see $work/media.log)"
+	no "the tar the suite builds byte by byte is read by tar(1) (lists: $_lst)"
 fi
 
-# the response file goes into the root of the ramdisk of bsd.rd: the
-# installer reads it there and never in the root of the CD
-if [ -f "$work/tree/mnt-rd/auto_install.conf" ]; then
+# --- the stock image of the media node -------------------------------------
+#
+# The tree of the image: the directory of the release holds the sets and
+# the ramdisk, with the raw names (8.0/amd64/bsd.rd). It holds the EFI
+# boot file (eficdboot) and no index.txt, as install80.iso does.
+_isotree=$work/isotree
+mkdir -p "$_isotree/8.0/amd64"
+printf 'the ramdisk of the release\n' | gzip -c > "$_isotree/8.0/amd64/bsd.rd"
+printf 'the boot file\n' > "$_isotree/8.0/amd64/cdbr"
+printf 'the catalog\n' > "$_isotree/8.0/amd64/boot.catalog"
+printf 'the efi boot file\n' > "$_isotree/8.0/amd64/eficdboot"
+printf 'the base set\n' > "$_isotree/8.0/amd64/base80.tgz"
+
+# stock_dir <name> — a stock directory: install80.iso and SHA256.8.0, in
+# the format of the release's SHA256.sig (signify(1) -C checks it): an
+# untrusted comment line, the base64 signature, then "SHA256 (file) = hex"
+stock_dir() {
+	_sd=$work/stock-$1
+	mkdir -p "$_sd"
+	printf 'the stock install image of the release 8.0\n' > "$_sd/install80.iso"
+	{
+		printf 'untrusted comment: verify with openbsd-80-base.pub\n'
+		printf 'RWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n'
+		printf 'SHA256 (base80.tgz) = %s\n' "$(sha_of "$_isotree/8.0/amd64/base80.tgz")"
+		printf 'SHA256 (install80.iso) = %s\n' "$(sha_of "$_sd/install80.iso")"
+		printf 'SHA256 (bsd.rd) = %s\n' "$(sha_of "$_isotree/8.0/amd64/bsd.rd")"
+	} > "$_sd/SHA256.8.0"
+	chmod 0444 "$_sd/install80.iso" "$_sd/SHA256.8.0"
+	chmod 0755 "$_sd"
+	printf '%s' "$_sd"
+}
+
+STOCK=$(stock_dir run)
+STOCK_ISO=$STOCK/install80.iso
+cp "$STOCK_ISO" "$work/stock-iso.before"
+MEDIA_RUN=$(media_copy run "$STOCK")
+if grep -q "^STOCK_DIR=$STOCK\$" "$MEDIA_RUN" 2> /dev/null; then
+	ok 'the copy of the helper the suite runs uses the stock directory of the suite'
+else
+	no 'the copy of the helper the suite runs uses the stock directory of the suite'
+fi
+
+# runmedia <helper> <tar> <release> <arch> [NAME=VALUE ...] — run the
+# helper with the stubs, the tar on stdin; RUNBASE holds out, err,
+# argv.log, mkd.log (the work directory), mtree (the mount points at
+# their unmount) and htree (the tree mkhybrid was given)
+_mrun=0
+runmedia() {
+	_rh=$1
+	_rt=$2
+	_rr=$3
+	_ra=$4
+	shift 4
+	_mrun=$((_mrun + 1))
+	RUNBASE=$work/run-$_mrun
+	mkdir -p "$RUNBASE"
+	: > "$RUNBASE/argv.log"
+	env PATH="$_mstub:$PATH" \
+		WTFBSD_TEST_UID="$_uid" \
+		WTFBSD_TEST_ARGV="$RUNBASE/argv.log" \
+		WTFBSD_TEST_ISO_TREE="$_isotree" \
+		WTFBSD_TEST_MKDLOG="$RUNBASE/mkd.log" \
+		WTFBSD_TEST_VND_COUNT="$RUNBASE/vc" \
+		WTFBSD_TEST_MOUNT_COUNT="$RUNBASE/mc" \
+		WTFBSD_TEST_VND_STATE="$RUNBASE/vs" \
+		WTFBSD_TEST_UMOUNT_TREE="$RUNBASE/mtree" \
+		WTFBSD_TEST_MKHYBRID_TREE="$RUNBASE/htree" \
+		"$@" \
+		sh "$_rh" prepare "$_rr" "$_ra" < "$_rt" > "$RUNBASE/out" 2> "$RUNBASE/err"
+}
+# runmedia_bg — the same, in the background; the pid is in _bgpid
+runmedia_bg() {
+	_rh=$1
+	_rt=$2
+	shift 2
+	_mrun=$((_mrun + 1))
+	RUNBASE=$work/run-$_mrun
+	mkdir -p "$RUNBASE"
+	: > "$RUNBASE/argv.log"
+	env PATH="$_mstub:$PATH" \
+		WTFBSD_TEST_UID="$_uid" \
+		WTFBSD_TEST_ARGV="$RUNBASE/argv.log" \
+		WTFBSD_TEST_ISO_TREE="$_isotree" \
+		WTFBSD_TEST_MKDLOG="$RUNBASE/mkd.log" \
+		WTFBSD_TEST_VND_COUNT="$RUNBASE/vc" \
+		WTFBSD_TEST_MOUNT_COUNT="$RUNBASE/mc" \
+		WTFBSD_TEST_VND_STATE="$RUNBASE/vs" \
+		"$@" \
+		sh "$_rh" prepare 8.0 amd64 < "$_rt" > "$RUNBASE/out" 2> "$RUNBASE/err" &
+	_bgpid=$!
+}
+# wait_log <file> <pattern> — wait (10 s at most) for a line of the log
+wait_log() {
+	_wi=0
+	while [ "$_wi" -lt 100 ]; do
+		grep -q "$2" "$1" 2> /dev/null && return 0
+		sleep 0.1
+		_wi=$((_wi + 1))
+	done
+	return 1
+}
+# the work directory of the run of RUNBASE
+run_wd() { head -n 1 "$RUNBASE/mkd.log" 2> /dev/null; }
+# refused <what> — the run failed and wrote nothing to stdout
+refused() {
+	if [ "$1" -ne 0 ] && [ ! -s "$RUNBASE/out" ]; then
+		ok "$2"
+	else
+		no "$2 (status $1, see $RUNBASE/err)"
+	fi
+}
+# err_has <pattern> <what>
+err_has() {
+	if grep -q -- "$1" "$RUNBASE/err" 2> /dev/null; then
+		ok "$2"
+	else
+		no "$2 (stderr: $(tr '\n' ' ' < "$RUNBASE/err" 2> /dev/null))"
+	fi
+}
+# attached_nothing <what> — the run refused before it attached the image
+attached_nothing() {
+	if grep -q '^vnconfig\|^mount' "$RUNBASE/argv.log" 2> /dev/null; then
+		no "$1"
+	else
+		ok "$1"
+	fi
+}
+
+# --- the helper builds the image ------------------------------------------
+
+printf '== the media helper builds the image ==\n'
+
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64
+_rc=$?
+_ok=$RUNBASE
+_wd=$(run_wd)
+_mlog=$_ok/argv.log
+if [ "$_rc" -eq 0 ]; then
+	ok 'the media helper prepares the media'
+else
+	no "the media helper prepares the media (see $_ok/err)"
+fi
+if [ "$(cat "$_ok/out" 2> /dev/null)" = 'the image of mkhybrid' ]; then
+	ok 'the media helper writes the image it rebuilt to stdout'
+else
+	no 'the media helper writes the image it rebuilt to stdout'
+fi
+
+# the work directory: mktemp -d with the template, a directory that is
+# gone when the run ends
+if grep -qx 'mktemp -d /tmp/wtfbsd-media.XXXXXX' "$_mlog" 2> /dev/null; then
+	ok 'the media helper makes its work directory with mktemp -d /tmp/wtfbsd-media.XXXXXX'
+else
+	no 'the media helper makes its work directory with mktemp -d /tmp/wtfbsd-media.XXXXXX'
+fi
+case $_wd in
+/tmp/wtfbsd-media.??????) ok 'the work directory has the shape of the template' ;;
+*) no "the work directory has the shape of the template (got: $_wd)" ;;
+esac
+if [ -n "$_wd" ] && [ ! -e "$_wd" ]; then
+	ok 'the media helper removes its work directory when the run ends'
+else
+	no 'the media helper removes its work directory when the run ends'
+fi
+
+# the response file goes into the root of the ramdisk of bsd.rd, where
+# install.sub reads it, and never into the tree of the CD
+if [ -f "$_ok/mtree/mnt-rd/auto_install.conf" ]; then
 	ok 'the media helper puts the response file into the ramdisk of bsd.rd'
 else
 	no 'the media helper puts the response file into the ramdisk of bsd.rd'
 fi
-if [ ! -e "$work/tree/mnt/auto_install.conf" ]; then
+if [ ! -e "$_ok/htree/auto_install.conf" ]; then
 	ok 'the media helper puts no response file in the root of the CD'
 else
 	no 'the media helper puts no response file in the root of the CD'
 fi
-if grep -q 'auto_install\.conf' "$_mlog" 2> /dev/null; then
-	no 'the media helper puts no response file in the tree of the CD'
-else
+if [ -z "$(find "$_ok/htree" -name auto_install.conf 2> /dev/null)" ]; then
 	ok 'the media helper puts no response file in the tree of the CD'
+else
+	no 'the media helper puts no response file in the tree of the CD'
 fi
-if grep -q '8\.0/amd64/site80\.tgz' "$_mlog" 2> /dev/null; then
+if cmp -s "$_ok/htree/8.0/amd64/site80.tgz" "$_staging/site.tgz"; then
 	ok 'the media helper puts the site set with the sets of the release'
 else
 	no 'the media helper puts the site set with the sets of the release'
 fi
-if [ ! -e "$work/tree/mnt/8.0/amd64/site80.tgz" ]; then
-	ok 'the media helper writes nothing into the image it read'
+if [ ! -e "$_ok/mtree/mnt/8.0/amd64/site80.tgz" ] && cmp -s "$STOCK_ISO" "$work/stock-iso.before"; then
+	ok 'the media helper writes nothing into the stock image'
 else
-	no 'the media helper writes nothing into the image it read'
+	no 'the media helper writes nothing into the stock image'
 fi
 
-# the image is mounted read-only and the ramdisk of bsd.rd is mounted
-# with the device of the ramdisk image
-if grep -q '^mount -t cd9660 /dev/vnd0c ' "$_mlog" 2> /dev/null; then
-	ok 'the media helper mounts the image read-only'
+# the stock image is mounted read-only, without devices and setuid; the
+# ramdisk is mounted from the device vnconfig(8) allocated for it
+if grep -q '^mount -t cd9660 -o rdonly,nodev,nosuid /dev/vnd0c ' "$_mlog" 2> /dev/null; then
+	ok 'the media helper mounts the stock image read-only, nodev, nosuid'
 else
-	no 'the media helper mounts the image read-only'
+	no 'the media helper mounts the stock image read-only, nodev, nosuid'
 fi
 if grep -q '^mount /dev/vnd1a ' "$_mlog" 2> /dev/null; then
 	ok 'the media helper mounts the ramdisk of bsd.rd'
@@ -2571,46 +2847,48 @@ else
 	no 'the media helper mounts the ramdisk of bsd.rd'
 fi
 if grep -q '^rdsetroot -x ' "$_mlog" 2> /dev/null \
-	&& grep -q '^rdsetroot .*/rd\.img$' "$_mlog" 2> /dev/null; then
+	&& grep -q '^rdsetroot [^-].*/rd\.img$' "$_mlog" 2> /dev/null; then
 	ok 'the media helper writes the ramdisk back with rdsetroot'
 else
 	no 'the media helper writes the ramdisk back with rdsetroot'
 fi
 
-# the response file points the installer at the sets of the CD
-if grep -q '^Location of sets = cd0$' "$work/tree/mnt-rd/auto_install.conf" 2> /dev/null; then
+# the response file: the sets are on cd0, in <release>/<arch>
+_resp=$_ok/mtree/mnt-rd/auto_install.conf
+if grep -qx 'Location of sets = cd0' "$_resp" 2> /dev/null; then
 	ok 'the response file points the installer at the sets of the CD'
 else
 	no 'the response file points the installer at the sets of the CD'
 fi
-if grep -q '^Pathname to the sets = 8.0/amd64$' "$work/tree/mnt-rd/auto_install.conf" 2> /dev/null; then
+if grep -qx 'Pathname to the sets = 8.0/amd64' "$_resp" 2> /dev/null \
+	&& [ "$(grep -c '^Pathname to the sets' "$_resp" 2> /dev/null)" -eq 1 ]; then
 	ok 'the response file names the path of the sets'
 else
 	no 'the response file names the path of the sets'
 fi
-if grep -q 'HTTP Server' "$work/tree/mnt-rd/auto_install.conf" 2> /dev/null; then
+if grep -q 'HTTP Server' "$_resp" 2> /dev/null; then
 	no 'the response file names no server of the sets'
 else
 	ok 'the response file names no server of the sets'
 fi
 
-# the image is rebuilt with mkhybrid(8), with the raw paths of the tree
-_mkh=$(grep '^mkhybrid ' "$_mlog" 2> /dev/null | head -1)
+# mkhybrid(8) with the raw paths of the tree (src/distrib/amd64/cdfs)
+_mkh=$(grep '^mkhybrid ' "$_mlog" 2> /dev/null | head -n 1)
 if [ -n "$_mkh" ]; then
 	ok 'the media helper rebuilds the image with mkhybrid'
 else
 	no 'the media helper rebuilds the image with mkhybrid'
 fi
 case $_mkh in
-*' -b 8.0/amd64/cdbr'*) ok 'mkhybrid gets the raw path of the boot catalog' ;;
-*) no 'mkhybrid gets the raw path of the boot catalog' ;;
+*' -b 8.0/amd64/cdbr '*) ok 'mkhybrid gets the raw path of the boot image' ;;
+*) no 'mkhybrid gets the raw path of the boot image' ;;
 esac
 case $_mkh in
-*' -c 8.0/amd64/boot.catalog'*) ok 'mkhybrid gets the raw path of the catalog' ;;
+*' -c 8.0/amd64/boot.catalog '*) ok 'mkhybrid gets the raw path of the catalog' ;;
 *) no 'mkhybrid gets the raw path of the catalog' ;;
 esac
 case $_mkh in
-*' -e 8.0/amd64/eficdboot'*) ok 'mkhybrid gets the raw path of the EFI boot file' ;;
+*' -e 8.0/amd64/eficdboot '*) ok 'mkhybrid gets the raw path of the EFI boot file' ;;
 *) no 'mkhybrid gets the raw path of the EFI boot file' ;;
 esac
 case $_mkh in
@@ -2618,774 +2896,1139 @@ case $_mkh in
 *) ok 'mkhybrid gets no El Torito image that the media does not hold' ;;
 esac
 case $_mkh in
-*'8_0'*|*';1'*) no 'mkhybrid gets the raw names of the tree' ;;
-*) ok 'mkhybrid gets the raw names of the tree' ;;
+*'8_0'* | *';1'*) no 'mkhybrid gets the raw names of the tree' ;;
+*'mkhybrid -a '*' -N '*) ok 'mkhybrid gets the raw names of the tree' ;;
+*) no 'mkhybrid gets the raw names of the tree (-a and -N, as the cdfs Makefile)' ;;
 esac
-if grep -q 'the image of mkhybrid' "$work/spool/image.iso" 2> /dev/null; then
-	ok 'the media helper writes the image it rebuilt'
+
+# the output is $WORK/out.iso, never the name of an input
+_outp=$(printf '%s\n' "$_mkh" | sed -n 's/.* -o \([^ ]*\) .*/\1/p')
+if [ -n "$_wd" ] && [ "$_outp" = "$_wd/out.iso" ]; then
+	ok 'the media helper writes the image to $WORK/out.iso'
 else
-	no 'the media helper writes the image it rebuilt'
+	no "the media helper writes the image to \$WORK/out.iso (got: $_outp)"
+fi
+case $_outp in
+"$STOCK_ISO" | */site.tgz | */install.conf | */input.tar | */install.iso | '')
+	no "the media helper never writes the image to an input path (got: $_outp)" ;;
+*) ok 'the media helper never writes the image to an input path' ;;
+esac
+if [ ! -e "$repo/media.iso" ] && [ ! -e "$work/media.iso" ]; then
+	ok 'the media helper writes no image outside its work directory'
+else
+	no 'the media helper writes no image outside its work directory'
 fi
 
-# The ramdisk of the image is the one of the run: the helper writes the
-# ramdisk back into the tree, and the tree it hands to mkhybrid(8) holds
-# a bsd.rd that is not the one it read.
-if [ -f "$work/mkhybrid-tree/8.0/amd64/bsd.rd" ]; then
+# the ramdisk of the image is the one of the run
+if [ -f "$_ok/htree/8.0/amd64/bsd.rd" ]; then
 	ok 'the tree the image is built from holds a bsd.rd'
 else
 	no 'the tree the image is built from holds a bsd.rd'
 fi
-if cmp -s "$work/mkhybrid-tree/8.0/amd64/bsd.rd" "$_isotree/8.0/amd64/bsd.rd" 2> /dev/null; then
+if cmp -s "$_ok/htree/8.0/amd64/bsd.rd" "$_isotree/8.0/amd64/bsd.rd" 2> /dev/null; then
 	no 'the bsd.rd of the image is not the bsd.rd of the media'
 else
 	ok 'the bsd.rd of the image is not the bsd.rd of the media'
 fi
-# gzip -9n writes no name and no timestamp in the header: the image of a
-# build is the image of every other build of it.
 if grep -q '^gzip -9n ' "$_mlog" 2> /dev/null; then
 	ok 'the media helper compresses the ramdisk with gzip -9n'
 else
 	no 'the media helper compresses the ramdisk with gzip -9n'
 fi
 
-# The media of a release holds no index.txt: the install is from the CD
-# and the installer reads the sets of the directory of the release. The
-# helper never creates one.
-if [ -e "$work/mkhybrid-tree/index.txt" ] || [ -e "$work/mkhybrid-tree/8.0/amd64/index.txt" ]; then
-	no 'the media helper creates no index.txt'
-else
+# install80.iso holds no index.txt, and the helper creates none
+if [ -z "$(find "$_ok/htree" -name index.txt 2> /dev/null)" ]; then
 	ok 'the media helper creates no index.txt'
-fi
-# The tree the image is built from is the thing to look at: the log of
-# the run says nothing about a file the helper never mentions.
-_idx=$(find "$work/mkhybrid-tree" -name 'index.txt' 2> /dev/null | wc -l)
-if [ "$_idx" -eq 0 ]; then
-	ok 'the media helper never writes an index.txt of its own'
 else
-	no "the media helper never writes an index.txt of its own (the tree holds $_idx)"
+	no 'the media helper creates no index.txt'
 fi
-if grep -q 'index.txt' "$work/media.log" 2> /dev/null; then
+if grep -q 'index.txt' "$_ok/err" 2> /dev/null; then
 	no 'the log of the helper mentions no index.txt'
 else
 	ok 'the log of the helper mentions no index.txt'
 fi
-# The assertion above can fail: a copy of the helper that writes an
-# index.txt of its own is caught by the tree the image is built from.
-sed -e "s|^SPOOL=/var/spool/wtfbsd-media\$|SPOOL=$work/spool|" \
-	-e 's|^mkdir -p "\$SETDIR"$|mkdir -p "$SETDIR"; printf "site80.tgz\\n" > "$SETDIR/index.txt"|' \
-	"$MEDIA" > "$work/media-index.sh"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-index-own.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-index-own" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-index-own" \
-	WTFBSD_TEST_MKHYBRID_TREE="$work/mkhybrid-tree-index-own" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-index-own" \
-	sh "$work/media-index.sh" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-index-own.log" 2>&1; then
-	ok 'the media helper prepares the media when it writes an index.txt'
+# that check can fail: a copy of the helper that writes an index.txt of
+# its own is caught by the tree the image is built from
+sed -e 's|^log "site set: /\$RELEASE/\$ARCH/\$SITENAME"$|&; printf "x\\n" > "$SETDIR/index.txt"|' \
+	"$MEDIA_RUN" > "$work/media-index-own.sh"
+if grep -q 'printf "x\\n" > "\$SETDIR/index.txt"' "$work/media-index-own.sh" 2> /dev/null; then
+	runmedia "$work/media-index-own.sh" "$IN_OK" 8.0 amd64
+	if [ -n "$(find "$RUNBASE/htree" -name index.txt 2> /dev/null)" ]; then
+		ok 'the tree the image is built from holds an index.txt a helper wrote'
+	else
+		no 'the tree the image is built from holds an index.txt a helper wrote'
+	fi
 else
-	no "the media helper prepares the media when it writes an index.txt (see $work/media-index-own.log)"
-fi
-if [ -n "$(find "$work/mkhybrid-tree-index-own" -name 'index.txt' 2> /dev/null)" ]; then
-	ok 'the tree the image is built from holds the index.txt the helper wrote'
-else
-	no 'the tree the image is built from holds the index.txt the helper wrote'
-fi
-# The log of the helper says nothing about it: the log is not the thing
-# to look at, the tree is.
-if grep -q 'index.txt' "$work/media-index-own.log" 2> /dev/null; then
-	no 'the log of the helper mentions no index.txt of its own'
-else
-	ok 'the log of the helper mentions no index.txt of its own'
+	no 'the copy of the helper that writes an index.txt was made'
 fi
 
-# The architecture of the media is an argument of the helper, and it is
-# never read out of the environment.
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-noarch.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-noarch" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-noarch" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-noarch" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 \
-	> "$work/media-noarch.log" 2>&1; then
-	no 'the media helper refuses a run without an architecture'
-else
-	ok 'the media helper refuses a run without an architecture'
-fi
-if grep -q 'ARCH' "$work/media-noarch.log" 2> /dev/null; then
-	ok 'the refusal of a run without an architecture names the architecture'
-else
-	no 'the refusal of a run without an architecture names the architecture'
-fi
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-badarch.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-badarch" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-badarch" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-badarch" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 AMD64 \
-	> "$work/media-badarch.log" 2>&1; then
-	no 'the media helper refuses an architecture that is not a lowercase name'
-else
-	ok 'the media helper refuses an architecture that is not a lowercase name'
-fi
-if grep -qi 'architecture' "$work/media-badarch.log" 2> /dev/null; then
-	ok 'the refusal of a bad architecture names the architecture'
-else
-	no 'the refusal of a bad architecture names the architecture'
-fi
-# The architecture of the environment is ignored: the argument names an
-# architecture the media does not hold, so the helper has to refuse it.
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-envarch.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-envarch" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-envarch" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-envarch" \
-	WTFBSD_ARCH=amd64 \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 aarch64 \
-	> "$work/media-envarch.log" 2>&1; then
-	no 'the media helper ignores the architecture of the environment'
-else
-	ok 'the media helper ignores the architecture of the environment'
-fi
-if grep -q '8\.0' "$work/media-envarch.log" 2> /dev/null \
-	&& grep -q 'aarch64' "$work/media-envarch.log" 2> /dev/null; then
-	ok 'the refusal of a missing architecture names the release and the architecture'
-else
-	no 'the refusal of a missing architecture names the release and the architecture'
-fi
-
-# A media without the EFI boot file of the release has no UEFI entry:
-# the helper refuses it instead of building a BIOS only image.
-_isotree_noefi=$work/isotree-noefi
-cp -R "$_isotree" "$_isotree_noefi"
-rm -f "$_isotree_noefi/8.0/amd64/eficdboot"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-noefi.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree_noefi" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-noefi" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-noefi" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-noefi" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-noefi.log" 2>&1; then
-	no 'the media helper refuses a media without an EFI boot file'
-else
-	ok 'the media helper refuses a media without an EFI boot file'
-fi
-if grep -q 'eficdboot' "$work/media-noefi.log" 2> /dev/null \
-	&& grep -q 'UEFI' "$work/media-noefi.log" 2> /dev/null; then
-	ok 'the refusal of a media without an EFI boot file names the file and the machine'
-else
-	no 'the refusal of a media without an EFI boot file names the file and the machine'
-fi
-if grep -q 'mkhybrid ' "$work/media-argv-noefi.log" 2> /dev/null; then
-	no 'the media helper builds no image without an EFI boot file'
-else
-	ok 'the media helper builds no image without an EFI boot file'
-fi
-
-# The log of the run names the files where they are in the image, and
-# never the work directory of the run.
-if grep -q 'site set: /8\.0/amd64/site80\.tgz' "$work/media.log" 2> /dev/null; then
+# the log names the files where they are in the image, and never a path
+# of the work directory
+if grep -q 'site set: /8\.0/amd64/site80\.tgz' "$_ok/err" 2> /dev/null; then
 	ok 'the log of the media helper names the site set in the image'
 else
 	no 'the log of the media helper names the site set in the image'
 fi
-if grep -q 'response file: /auto_install\.conf in the ramdisk of bsd\.rd' "$work/media.log" 2> /dev/null; then
+if grep -q 'response file: /auto_install\.conf in the ramdisk of bsd\.rd' "$_ok/err" 2> /dev/null; then
 	ok 'the log of the media helper names the response file in the ramdisk'
 else
 	no 'the log of the media helper names the response file in the ramdisk'
 fi
-if grep -q "$work/spool/work\." "$work/media.log" 2> /dev/null; then
+if grep -q '/tmp/wtfbsd-media\.' "$_ok/err" 2> /dev/null; then
 	no 'the log of the media helper prints no path of the work directory'
 else
 	ok 'the log of the media helper prints no path of the work directory'
 fi
 
-# The whole run is exact: the commands run in this order, and no other.
-_seen=$(grep -E '^(uname|id|vnconfig|mount|umount|rdsetroot|gzip|mkhybrid) ' "$_mlog" 2> /dev/null \
-	| sed -e "s|$work|WORK|g" -e 's|work\.[A-Za-z0-9]\{6\}|work.XXXXXX|g' \
-	-e 's|Copyright (c) [0-9]\{4\}|Copyright (c) <year>|')
+# The whole run is exact: these commands, in this order, and no other.
+_seen=$(grep -E '^(uname|id|sha256|mktemp|vnconfig|mount|umount|rdsetroot|gzip|mkhybrid) ' "$_mlog" 2> /dev/null \
+	| sed -e "s|${_wd:-/nonexistent}|W|g" -e "s|$work|T|g" \
+		-e 's|Copyright (c) [0-9]\{4\}|Copyright (c) <year>|')
 _want='uname -s
 id -u
-vnconfig WORK/spool/image.iso
-mount -t cd9660 /dev/vnd0c WORK/spool/work.XXXXXX/mnt
-umount WORK/spool/work.XXXXXX/mnt
+sha256 -q T/stock-run/install80.iso
+mktemp -d /tmp/wtfbsd-media.XXXXXX
+vnconfig T/stock-run/install80.iso
+mount -t cd9660 -o rdonly,nodev,nosuid /dev/vnd0c W/mnt
+umount W/mnt
 vnconfig -u vnd0
-gzip -dc WORK/spool/work.XXXXXX/tree/8.0/amd64/bsd.rd
-rdsetroot -x WORK/spool/work.XXXXXX/bsd.rd.raw WORK/spool/work.XXXXXX/rd.img
-vnconfig WORK/spool/work.XXXXXX/rd.img
-mount /dev/vnd1a WORK/spool/work.XXXXXX/mnt-rd
-umount WORK/spool/work.XXXXXX/mnt-rd
+gzip -dc W/tree/8.0/amd64/bsd.rd
+rdsetroot -x W/bsd.rd.raw W/rd.img
+vnconfig W/rd.img
+mount /dev/vnd1a W/mnt-rd
+umount W/mnt-rd
 vnconfig -u vnd1
-rdsetroot WORK/spool/work.XXXXXX/bsd.rd.raw WORK/spool/work.XXXXXX/rd.img
-gzip -9n WORK/spool/work.XXXXXX/bsd.rd.raw
-mkhybrid -a -R -T -L -l -d -D -N -o WORK/spool/work.XXXXXX/install.iso -v -v -A OpenBSD 8.0 amd64 Install CD -P Copyright (c) <year> The OpenBSD Project -p The OpenBSD Project -V OpenBSD/amd64 8.0 Install CD -b 8.0/amd64/cdbr -c 8.0/amd64/boot.catalog -e 8.0/amd64/eficdboot WORK/spool/work.XXXXXX/tree'
+rdsetroot W/bsd.rd.raw W/rd.img
+gzip -9n W/bsd.rd.raw
+mkhybrid -a -R -T -L -l -d -D -N -o W/out.iso -v -v -A OpenBSD 8.0 amd64 Install CD -P Copyright (c) <year> The OpenBSD Project -p The OpenBSD Project -V OpenBSD/amd64 8.0 Install CD -b 8.0/amd64/cdbr -c 8.0/amd64/boot.catalog -e 8.0/amd64/eficdboot W/tree'
 if [ "$_seen" = "$_want" ]; then
 	ok 'the media helper runs its commands in the order of the run'
 else
 	no "the media helper runs its commands in the order of the run (got: $_seen)"
 fi
 
-# The cleanup is exact: every mount point that was mounted is unmounted
-# once, every device that was attached is detached once, the mount point
-# of a device is unmounted before the device is detached, and the
-# work directory of the run holds the mount points.
-_umounts=$(grep '^umount ' "$_mlog" 2> /dev/null | wc -l)
-_detaches=$(grep '^vnconfig -u ' "$_mlog" 2> /dev/null | wc -l)
+# nothing outside the work directory: every absolute path the tools were
+# given is under the work directory, a device, or the stock image
+_outside=''
+for _p in $(grep -E '^(vnconfig|mount|umount|rdsetroot|gzip|mkhybrid) ' "$_mlog" 2> /dev/null \
+	| tr ' ' '\n' | grep '^/' | sort -u); do
+	case $_p in
+	"$_wd"/* | /dev/vnd[0-9][ac] | "$STOCK_ISO") ;;
+	*) _outside="$_outside $_p" ;;
+	esac
+done
+if [ -n "$_wd" ] && [ -z "$_outside" ]; then
+	ok 'the media helper touches nothing outside its work directory'
+else
+	no "the media helper touches nothing outside its work directory (got:$_outside)"
+fi
+
+# The cleanup is exact: every mount once, every device once, each mount
+# point before its device, the mount points under the work directory.
+_umounts=$(grep -c '^umount ' "$_mlog" 2> /dev/null)
+_detaches=$(grep -c '^vnconfig -u ' "$_mlog" 2> /dev/null)
 if [ "$_umounts" -eq 2 ] && [ "$_detaches" -eq 2 ]; then
 	ok 'the media helper unmounts every mount once and detaches every device once'
 else
 	no "the media helper unmounts every mount once and detaches every device once (umount: $_umounts, vnconfig -u: $_detaches)"
 fi
-# the mount points of the run
-_mnt_cd=$(grep '^mount -t cd9660 ' "$_mlog" 2> /dev/null | head -1 | sed -e 's/^mount -t cd9660 [^ ]* //')
-_mnt_rd=$(grep '^mount /dev/' "$_mlog" 2> /dev/null | head -1 | sed -e 's/^mount [^ ]* //')
-# the devices of the run
-_dev_cd=$(grep '^mount -t cd9660 ' "$_mlog" 2> /dev/null | head -1 | awk '{print $4}' | sed -e 's|^/dev/||' -e 's|c$||')
-_dev_rd=$(grep '^mount /dev/' "$_mlog" 2> /dev/null | head -1 | awk '{print $2}' | sed -e 's|^/dev/||' -e 's|a$||')
-# the unmounts, in the order they ran
+_mnt_cd=$(grep '^mount -t cd9660 ' "$_mlog" 2> /dev/null | head -n 1 | awk '{ print $NF }')
+_mnt_rd=$(grep '^mount /dev/' "$_mlog" 2> /dev/null | head -n 1 | awk '{ print $NF }')
+_dev_cd=$(grep '^mount -t cd9660 ' "$_mlog" 2> /dev/null | head -n 1 | awk '{ print $(NF - 1) }' | sed -e 's|^/dev/||' -e 's|c$||')
+_dev_rd=$(grep '^mount /dev/' "$_mlog" 2> /dev/null | head -n 1 | awk '{ print $2 }' | sed -e 's|^/dev/||' -e 's|a$||')
 _um_cd=$(grep '^umount ' "$_mlog" 2> /dev/null | sed -n '1s/^umount //p')
 _um_rd=$(grep '^umount ' "$_mlog" 2> /dev/null | sed -n '2s/^umount //p')
-# the detaches, in the order they ran
 _de_cd=$(grep '^vnconfig -u ' "$_mlog" 2> /dev/null | sed -n '1s/^vnconfig -u //p')
 _de_rd=$(grep '^vnconfig -u ' "$_mlog" 2> /dev/null | sed -n '2s/^vnconfig -u //p')
-if [ "$_um_cd" = "$_mnt_cd" ] && [ "$_um_rd" = "$_mnt_rd" ]; then
+if [ -n "$_mnt_cd" ] && [ "$_um_cd" = "$_mnt_cd" ] && [ "$_um_rd" = "$_mnt_rd" ]; then
 	ok 'the media helper unmounts exactly the mount points it mounted'
 else
 	no "the media helper unmounts exactly the mount points it mounted (mounted: $_mnt_cd $_mnt_rd; unmounted: $_um_cd $_um_rd)"
 fi
-if [ "$_de_cd" = "$_dev_cd" ] && [ "$_de_rd" = "$_dev_rd" ]; then
+if [ -n "$_dev_cd" ] && [ "$_de_cd" = "$_dev_cd" ] && [ "$_de_rd" = "$_dev_rd" ]; then
 	ok 'the media helper detaches exactly the devices it attached'
 else
 	no "the media helper detaches exactly the devices it attached (attached: $_dev_cd $_dev_rd; detached: $_de_cd $_de_rd)"
 fi
-# the mount points live under the work directory of the run, not in the
-# root of the file system
-_wd_cd=${_mnt_cd%/*}
-_wd_rd=${_mnt_rd%/*}
-if [ -n "$_wd_cd" ] && [ "$_wd_cd" != / ] && [ "$_wd_cd" = "$_wd_rd" ]; then
-	ok 'the mount points of the media helper are under the work directory of the run'
-else
-	no "the mount points of the media helper are under the work directory of the run (got: $_mnt_cd and $_mnt_rd)"
-fi
-# the work directory of the run is under the spool of the media node:
-# the helper creates nothing outside the spool
-case $_wd_cd in
-"$work"/spool/work.*) ok 'the work directory of the media helper is under the spool' ;;
-*) no "the work directory of the media helper is under the spool (got: $_wd_cd)" ;;
+case $_mnt_cd:$_mnt_rd in
+"$_wd/mnt:$_wd/mnt-rd") ok 'the mount points of the media helper are under the work directory of the run' ;;
+*) no "the mount points of the media helper are under the work directory of the run (got: $_mnt_cd and $_mnt_rd)" ;;
 esac
-# the unmount of a mount point comes before the detach of its device
 _umn_cd=$(grep -n '^umount ' "$_mlog" 2> /dev/null | sed -n '1s/:.*//p')
-_denc_cd=$(grep -n '^vnconfig -u ' "$_mlog" 2> /dev/null | sed -n '1s/:.*//p')
+_den_cd=$(grep -n '^vnconfig -u ' "$_mlog" 2> /dev/null | sed -n '1s/:.*//p')
 _umn_rd=$(grep -n '^umount ' "$_mlog" 2> /dev/null | sed -n '2s/:.*//p')
-_denc_rd=$(grep -n '^vnconfig -u ' "$_mlog" 2> /dev/null | sed -n '2s/:.*//p')
-if [ -n "$_umn_cd" ] && [ -n "$_denc_cd" ] && [ "$_umn_cd" -lt "$_denc_cd" ]; then
+_den_rd=$(grep -n '^vnconfig -u ' "$_mlog" 2> /dev/null | sed -n '2s/:.*//p')
+if [ -n "$_umn_cd" ] && [ -n "$_den_cd" ] && [ "$_umn_cd" -lt "$_den_cd" ]; then
 	ok 'the media helper unmounts the media before it detaches its device'
 else
 	no 'the media helper unmounts the media before it detaches its device'
 fi
-if [ -n "$_umn_rd" ] && [ -n "$_denc_rd" ] && [ "$_umn_rd" -lt "$_denc_rd" ]; then
+if [ -n "$_umn_rd" ] && [ -n "$_den_rd" ] && [ "$_umn_rd" -lt "$_den_rd" ]; then
 	ok 'the media helper unmounts the ramdisk before it detaches its device'
 else
 	no 'the media helper unmounts the ramdisk before it detaches its device'
 fi
-# the devices are allocated by vnconfig(8): the helper names no unit of
-# its own
 if [ -n "$_dev_cd" ] && [ -n "$_dev_rd" ] && [ "$_dev_cd" != "$_dev_rd" ]; then
 	ok 'the media helper uses a device of its own for the media and for the ramdisk'
 else
 	no 'the media helper uses a device of its own for the media and for the ramdisk'
 fi
 
-# The cleanup undoes only the steps that ran: when the attach of the
-# ramdisk fails, the media was already unmounted and detached, and the
-# device of the ramdisk is never mentioned.
-_mlog3=$work/media-argv-fail.log
-: > "$_mlog3"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$_mlog3" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-fail" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-fail" \
-	WTFBSD_TEST_VND_FAIL_ON=2 \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-2" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-fail.log" 2>&1; then
-	no 'the media helper fails when the ramdisk cannot be attached'
+# A media that holds an index.txt: the site set is listed in it once, and
+# no index.txt is created anywhere else.
+_isotree_idx=$work/isotree-index
+cp -R "$_isotree" "$_isotree_idx"
+printf 'base80.tgz\n' > "$_isotree_idx/8.0/amd64/index.txt"
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_ISO_TREE="$_isotree_idx"
+if [ "$?" -eq 0 ]; then
+	ok 'the media helper prepares a media that holds an index.txt'
 else
-	ok 'the media helper fails when the ramdisk cannot be attached'
+	no "the media helper prepares a media that holds an index.txt (see $RUNBASE/err)"
 fi
-_fu=$(grep '^umount ' "$_mlog3" 2> /dev/null | wc -l)
-_fd=$(grep '^vnconfig -u ' "$_mlog3" 2> /dev/null | wc -l)
+if grep -qx 'site80.tgz' "$RUNBASE/htree/8.0/amd64/index.txt" 2> /dev/null \
+	&& grep -qx 'base80.tgz' "$RUNBASE/htree/8.0/amd64/index.txt" 2> /dev/null; then
+	ok 'the media helper lists the site set in the index.txt of the media'
+else
+	no 'the media helper lists the site set in the index.txt of the media'
+fi
+if [ "$(grep -c '^site80\.tgz$' "$RUNBASE/htree/8.0/amd64/index.txt" 2> /dev/null)" = 1 ]; then
+	ok 'the media helper lists the site set once'
+else
+	no 'the media helper lists the site set once'
+fi
+if [ -e "$RUNBASE/htree/index.txt" ]; then
+	no 'the media helper creates no index.txt in the root of the CD'
+else
+	ok 'the media helper creates no index.txt in the root of the CD'
+fi
+# an index.txt that already lists the site set is left as it is
+printf 'base80.tgz\nsite80.tgz\n' > "$_isotree_idx/8.0/amd64/index.txt"
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_ISO_TREE="$_isotree_idx"
+if [ "$(grep -c '^site80\.tgz$' "$RUNBASE/htree/8.0/amd64/index.txt" 2> /dev/null)" = 1 ]; then
+	ok 'the media helper lists the site set once when the index.txt already lists it'
+else
+	no 'the media helper lists the site set once when the index.txt already lists it'
+fi
+
+# --- the input on stdin: two plain members, checked by their header bytes
+
+printf '== the media helper reads the tar headers itself ==\n'
+
+# in_tar <name> <hdr args...> — a tar: one crafted header, then the data
+# of install.conf for a member of that name, then the regular members
+# that are not that name, then the end of the archive
+_conf=$_staging/install.conf
+_site=$_staging/site.tgz
+_conf_n=$(wc -c < "$_conf" | tr -d ' ')
+
+# a hard link (type flag 1) named install.conf, linking site.tgz
+_t=$work/in-hard.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$_site"
+tar_hdr "$_t" install.conf 1 0 site.tgz
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a hard link member (type flag 1) is refused, nothing on stdout'
+err_has 'type flag 0x31' 'the refusal of a hard link names its type flag'
+attached_nothing 'a hard link member is refused before the stock image is attached'
+# OpenBSD tar lists a hard link as '-rw-r--r-- ... install.conf == site.tgz':
+# a tar whose listing says '-' for every member changes nothing
+_mstub_tv=$work/mediastub-tv
+mkdir -p "$_mstub_tv"
+cat > "$_mstub_tv/tar" <<'STUB'
+#!/bin/sh
+case ${1:-} in
+-t*)
+	printf '%s\n' '-rw-r--r--  1 build    build          28 Jan  1 00:00 site.tgz' \
+		'-rw-r--r--  1 build    build           0 Jan  1 00:00 install.conf == site.tgz'
+	exit 0
+	;;
+esac
+exec env PATH="$WTFBSD_TEST_REALPATH" tar "$@"
+STUB
+chmod +x "$_mstub_tv/tar"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64 PATH="$_mstub_tv:$_mstub:$PATH" WTFBSD_TEST_REALPATH="$PATH"
+refused "$?" 'a hard link member is refused even when tar -tv lists it with a leading -'
+
+# a symbolic link (type flag 2) named install.conf
+_t=$work/in-sym.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$_site"
+tar_hdr "$_t" install.conf 2 0 /etc/master.passwd
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a symlink member (type flag 2) is refused, nothing on stdout'
+err_has 'type flag 0x32' 'the refusal of a symlink names its type flag'
+
+# a directory (type flag 5) named install.conf
+_t=$work/in-dir.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$_site"
+tar_hdr "$_t" install.conf 5 0
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a directory member (type flag 5) is refused, nothing on stdout'
+err_has 'type flag 0x35' 'the refusal of a directory names its type flag'
+
+# extended headers: pax (x, g) and GNU (L, K), each named like a member
+# the run accepts, followed by the member itself
+for _x in x g L K; do
+	_t=$work/in-ext-$_x.tar
+	printf '30 path=site.tgz\n' > "$work/ext-rec"
+	: > "$_t"
+	tar_hdr "$_t" site.tgz "$_x" "$(wc -c < "$work/ext-rec" | tr -d ' ')"
+	tar_data "$_t" "$work/ext-rec"
+	tar_file "$_t" site.tgz "$_site"
+	tar_file "$_t" install.conf "$_conf"
+	tar_end "$_t"
+	runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+	refused "$?" "an extended header (type flag $_x) is refused, nothing on stdout"
+	err_has 'extended tar header' "the refusal of a type flag $_x header names the extended header"
+done
+
+# a regular member with type flag NUL (the old regular file) is accepted
+_t=$work/in-nul.tar
+: > "$_t"
+tar_hdr "$_t" site.tgz '' "$(wc -c < "$_site" | tr -d ' ')"
+tar_data "$_t" "$_site"
+tar_file "$_t" install.conf "$_conf"
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+if [ "$?" -eq 0 ]; then
+	ok 'a regular member with type flag NUL is accepted'
+else
+	no "a regular member with type flag NUL is accepted (see $RUNBASE/err)"
+fi
+
+# names: a slash, a .., a name with bytes after its NUL, a prefix, a name
+# the run does not know (install.iso: the image is not an input)
+for _case in 'sub/site.tgz:slash' '../install.conf:dotdot' 'install.iso:iso' 'site.tgz\000junk:nuljunk'; do
+	_nm=${_case%:*}
+	_tag=${_case##*:}
+	_t=$work/in-name-$_tag.tar
+	: > "$_t"
+	tar_file "$_t" install.conf "$_conf"
+	tar_hdr "$_t" "$_nm" 0 "$(wc -c < "$_site" | tr -d ' ')"
+	tar_data "$_t" "$_site"
+	tar_end "$_t"
+	runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+	refused "$?" "a member named $_tag is refused, nothing on stdout"
+	err_has 'does not name' "the refusal of a member named $_tag names the member it refused"
+done
+_t=$work/in-prefix.tar
+: > "$_t"
+tar_file "$_t" install.conf "$_conf"
+tar_hdr "$_t" site.tgz 0 "$(wc -c < "$_site" | tr -d ' ')" '' etc
+tar_data "$_t" "$_site"
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a member with a ustar prefix is refused, nothing on stdout'
+err_has 'path prefix' 'the refusal of a ustar prefix names the prefix'
+
+# a third member, a missing member, a member twice
+_t=$work/in-extra.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$_site"
+tar_file "$_t" install.conf "$_conf"
+tar_file "$_t" extra.tgz "$_site"
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a third member is refused, nothing on stdout'
+_t=$work/in-missing.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$_site"
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a missing member is refused, nothing on stdout'
+_t=$work/in-twice.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$_site"
+tar_file "$_t" site.tgz "$_site"
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a member given twice is refused, nothing on stdout'
+err_has 'more than once' 'the refusal of a member given twice says so'
+
+# the format: a bad checksum, no ustar magic, the GNU magic, no end
+_t=$work/in-sum.tar
+: > "$_t"
+tar_hdr "$_t" site.tgz 0 "$(wc -c < "$_site" | tr -d ' ')" '' '' ustar badsum
+tar_data "$_t" "$_site"
+tar_file "$_t" install.conf "$_conf"
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a header with a bad checksum is refused, nothing on stdout'
+for _mg in none gnu; do
+	_t=$work/in-magic-$_mg.tar
+	: > "$_t"
+	tar_hdr "$_t" site.tgz 0 "$(wc -c < "$_site" | tr -d ' ')" '' '' "$_mg"
+	tar_data "$_t" "$_site"
+	tar_file "$_t" install.conf "$_conf"
+	tar_end "$_t"
+	runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+	refused "$?" "a header with the magic $_mg is refused, nothing on stdout"
+done
+_t=$work/in-noend.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$_site"
+tar_file "$_t" install.conf "$_conf"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'a tar without its end blocks is refused, nothing on stdout'
+
+# the caps: a copy of the helper with small caps (stdin 8192 bytes, the
+# site set 1024, the response file 256)
+MEDIA_CAPS=$(media_copy caps "$STOCK" 8192 1024 256)
+dd if=/dev/zero bs=1 count=2000 2> /dev/null | tr '\000' 'a' > "$work/big-site.tgz"
+_t=$work/in-bigsite.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$work/big-site.tgz"
+tar_file "$_t" install.conf "$_conf"
+tar_end "$_t"
+runmedia "$MEDIA_CAPS" "$_t" 8.0 amd64
+refused "$?" 'a site set over its cap is refused, nothing on stdout'
+err_has 'site.tgz of 2000 bytes' 'the refusal of a site set over its cap names its size'
+dd if=/dev/zero bs=1 count=300 2> /dev/null | tr '\000' '#' > "$work/big.conf"
+_t=$work/in-bigconf.tar
+: > "$_t"
+tar_file "$_t" site.tgz "$_site"
+tar_file "$_t" install.conf "$work/big.conf"
+tar_end "$_t"
+runmedia "$MEDIA_CAPS" "$_t" 8.0 amd64
+refused "$?" 'a response file over its cap is refused, nothing on stdout'
+dd if=/dev/zero bs=1024 count=20 2> /dev/null > "$work/in-huge.tar"
+runmedia "$MEDIA_CAPS" "$work/in-huge.tar" 8.0 amd64
+refused "$?" 'stdin over its cap is refused, nothing on stdout'
+err_has 'larger than 8192' 'the refusal of stdin over its cap names the cap'
+attached_nothing 'stdin over its cap is refused before the stock image is attached'
+runmedia "$MEDIA_CAPS" "$IN_OK" 8.0 amd64
+if [ "$?" -eq 0 ]; then
+	ok 'an input under the caps is accepted by the copy with small caps'
+else
+	no "an input under the caps is accepted by the copy with small caps (see $RUNBASE/err)"
+fi
+
+# --- the stock image: root-owned, signed, never an input ---------------
+
+printf '== the media helper takes the stock image of the media node ==\n'
+
+# a wrong sha256: the image is refused before it is attached
+_s=$(stock_dir badsum)
+chmod 0644 "$_s/install80.iso"
+printf 'the image was changed\n' >> "$_s/install80.iso"
+chmod 0444 "$_s/install80.iso"
+runmedia "$(media_copy badsum "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'a stock image with a wrong sha256 is refused, nothing on stdout'
+err_has 'does not match' 'the refusal of a wrong sha256 says it does not match'
+attached_nothing 'a stock image with a wrong sha256 is never attached'
+
+_s=$(stock_dir nosums)
+chmod 0755 "$_s"
+rm -f "$_s/SHA256.8.0"
+runmedia "$(media_copy nosums "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'a stock image without the SHA256 file of its release is refused'
+err_has 'SHA256.8.0' 'the refusal names the SHA256 file'
+
+_s=$(stock_dir noiso)
+rm -f "$_s/install80.iso"
+runmedia "$(media_copy noiso "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'a missing stock image is refused'
+err_has "$_s/install80.iso" 'the refusal of a missing stock image names its path'
+
+_s=$(stock_dir twice)
+chmod 0644 "$_s/SHA256.8.0"
+grep 'install80' "$_s/SHA256.8.0" > "$work/sums-twice-line"
+cat "$work/sums-twice-line" >> "$_s/SHA256.8.0"
+chmod 0444 "$_s/SHA256.8.0"
+runmedia "$(media_copy twice "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'a SHA256 file that names the image twice is refused'
+
+_s=$(stock_dir symlink)
+mv "$_s/install80.iso" "$work/stock-symlink-target.iso"
+ln -s "$work/stock-symlink-target.iso" "$_s/install80.iso"
+runmedia "$(media_copy symlink "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'a stock image that is a symbolic link is refused'
+err_has 'symbolic link' 'the refusal of a symlinked stock image says symbolic link'
+
+_s=$(stock_dir sumslink)
+mv "$_s/SHA256.8.0" "$work/stock-sums-target"
+ln -s "$work/stock-sums-target" "$_s/SHA256.8.0"
+runmedia "$(media_copy sumslink "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'a SHA256 file that is a symbolic link is refused'
+
+_s=$(stock_dir foreign)
+runmedia "$(media_copy foreign "$_s")" "$IN_OK" 8.0 amd64 WTFBSD_TEST_STAT_FOREIGN="$_s/install80.iso"
+refused "$?" 'a stock image not owned by root is refused'
+err_has 'not owned by root' 'the refusal of a stock image not owned by root says so'
+
+_s=$(stock_dir gwrite)
+chmod 0464 "$_s/install80.iso"
+runmedia "$(media_copy gwrite "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'a group-writable stock image is refused'
+_s=$(stock_dir owrite)
+chmod 0446 "$_s/SHA256.8.0"
+runmedia "$(media_copy owrite "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'an other-writable SHA256 file is refused'
+err_has 'writable by the group or by others' 'the refusal of a writable file says so'
+_s=$(stock_dir dwrite)
+chmod 0777 "$_s"
+runmedia "$(media_copy dwrite "$_s")" "$IN_OK" 8.0 amd64
+refused "$?" 'a stock directory others can write is refused'
+chmod 0755 "$_s"
+
+# an input tar that carries the image is refused: the image is not input
+_t=$work/in-iso.tar
+: > "$_t"
+tar_file "$_t" install.iso "$STOCK_ISO"
+tar_file "$_t" site.tgz "$_site"
+tar_file "$_t" install.conf "$_conf"
+tar_end "$_t"
+runmedia "$MEDIA_RUN" "$_t" 8.0 amd64
+refused "$?" 'an input that carries an install.iso is refused'
+
+# --- the work directory --------------------------------------------------
+
+printf '== the work directory of the media helper ==\n'
+
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_MKTEMP_FAKE="$work/not-the-template"
+refused "$?" 'a work directory of another shape is refused'
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_MKTEMP_MODE=0755
+refused "$?" 'a work directory that is not mode 0700 is refused'
+rm_workdir "$(run_wd)"
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 'WTFBSD_TEST_STAT_FOREIGN=/tmp/wtfbsd-media.*'
+refused "$?" 'a work directory not owned by root is refused'
+rm_workdir "$(run_wd)"
+
+# --- the tree of the stock image ------------------------------------------
+
+printf '== the media helper follows no link of the stock image ==\n'
+
+# 8.0/amd64 is a symbolic link to a directory outside the tree
+_iso_sym=$work/isotree-symlink
+_elsewhere=$work/elsewhere
+mkdir -p "$_iso_sym/8.0" "$_elsewhere"
+cp -R "$_isotree/8.0/amd64" "$_elsewhere/amd64"
+ln -s "$_elsewhere/amd64" "$_iso_sym/8.0/amd64"
+_before=$(cd "$_elsewhere" && find . -type f -exec cksum {} + | sort)
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_ISO_TREE="$_iso_sym"
+refused "$?" 'a stock image whose 8.0/amd64 is a symbolic link is refused'
+err_has 'not a regular file or a directory: 8.0/amd64' 'the refusal names the entry that is not a regular file or a directory'
+if grep -q '^gzip \|^rdsetroot \|^mkhybrid ' "$RUNBASE/argv.log" 2> /dev/null; then
+	no 'a stock image with a symbolic link is refused before any write'
+else
+	ok 'a stock image with a symbolic link is refused before any write'
+fi
+_after=$(cd "$_elsewhere" && find . -type f -exec cksum {} + | sort)
+if [ "$_before" = "$_after" ] && [ ! -e "$_elsewhere/amd64/site80.tgz" ]; then
+	ok 'the target of the symbolic link is left as it was'
+else
+	no 'the target of the symbolic link is left as it was'
+fi
+_sym_wd=$(run_wd)
+if [ -n "$_sym_wd" ] && [ ! -e "$_sym_wd" ] && [ "$(grep -c '^vnconfig -u ' "$RUNBASE/argv.log")" -eq 1 ]; then
+	ok 'the refusal of a symbolic link cleans up the mount and the device'
+else
+	no 'the refusal of a symbolic link cleans up the mount and the device'
+fi
+
+# a fifo in the tree is refused too
+_iso_fifo=$work/isotree-fifo
+cp -R "$_isotree" "$_iso_fifo"
+if mkfifo "$_iso_fifo/8.0/amd64/fifo" 2> /dev/null; then
+	runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_ISO_TREE="$_iso_fifo"
+	refused "$?" 'a stock image that holds a fifo is refused'
+fi
+
+# The write guard stands alone: a copy of the helper without the check
+# of the tree still refuses every path that is a link or resolves outside
+# the tree, before it reads or writes it.
+sed -e '/^refuse_odd_entries "\$MNT"$/d' "$MEDIA_RUN" > "$work/media-noodd.sh"
+if [ "$(grep -c '^refuse_odd_entries "\$MNT"$' "$MEDIA_RUN")" -eq 1 ] \
+	&& [ "$(grep -c '^refuse_odd_entries "\$MNT"$' "$work/media-noodd.sh")" -eq 0 ]; then
+	runmedia "$work/media-noodd.sh" "$IN_OK" 8.0 amd64 WTFBSD_TEST_ISO_TREE="$_iso_sym"
+	refused "$?" 'without the check of the tree, the write guard refuses a symlinked 8.0/amd64'
+	err_has 'symbolic link in the tree' 'the write guard names the symbolic link'
+	_after=$(cd "$_elsewhere" && find . -type f -exec cksum {} + | sort)
+	if [ "$_before" = "$_after" ] && [ ! -e "$_elsewhere/amd64/site80.tgz" ]; then
+		ok 'the write guard leaves the target of the symbolic link as it was'
+	else
+		no 'the write guard leaves the target of the symbolic link as it was'
+	fi
+	# bsd.rd is a link to a file outside the tree: never read
+	_iso_rdl=$work/isotree-rdlink
+	cp -R "$_isotree" "$_iso_rdl"
+	printf 'a secret of the media node\n' > "$work/secret"
+	rm -f "$_iso_rdl/8.0/amd64/bsd.rd"
+	ln -s "$work/secret" "$_iso_rdl/8.0/amd64/bsd.rd"
+	runmedia "$work/media-noodd.sh" "$IN_OK" 8.0 amd64 WTFBSD_TEST_ISO_TREE="$_iso_rdl"
+	refused "$?" 'without the check of the tree, the write guard refuses a symlinked bsd.rd'
+	if grep -q '^gzip ' "$RUNBASE/argv.log" 2> /dev/null; then
+		no 'the write guard never reads through a symlinked bsd.rd'
+	else
+		ok 'the write guard never reads through a symlinked bsd.rd'
+	fi
+else
+	no 'the copy of the helper without the check of the tree was made'
+fi
+
+# --- the EFI boot file ----------------------------------------------------
+
+printf '== the media helper needs the EFI boot file ==\n'
+
+_iso_noefi=$work/isotree-noefi
+cp -R "$_isotree" "$_iso_noefi"
+rm -f "$_iso_noefi/8.0/amd64/eficdboot"
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_ISO_TREE="$_iso_noefi"
+refused "$?" 'the media helper refuses a media without an EFI boot file'
+if grep -q 'eficdboot' "$RUNBASE/err" 2> /dev/null && grep -q 'UEFI' "$RUNBASE/err" 2> /dev/null; then
+	ok 'the refusal of a media without an EFI boot file names the file and the machine'
+else
+	no 'the refusal of a media without an EFI boot file names the file and the machine'
+fi
+if grep -q '^mkhybrid ' "$RUNBASE/argv.log" 2> /dev/null; then
+	no 'the media helper builds no image without an EFI boot file'
+else
+	ok 'the media helper builds no image without an EFI boot file'
+fi
+
+# --- the release and the architecture are arguments -----------------------
+
+printf '== the release and the architecture are arguments of the helper ==\n'
+
+runmedia "$MEDIA_RUN" "$IN_OK" '' amd64
+refused "$?" 'the media helper refuses to run without a release'
+err_has 'release' 'the refusal of a run without a release names the release'
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0.1 amd64
+refused "$?" 'the media helper refuses a release that is not N.N'
+err_has 'N.N' 'the refusal of a bad release names the shape of a release'
+runmedia "$MEDIA_RUN" "$IN_OK" '' amd64 WTFBSD_RELEASE=8.0 RELEASE=8.0
+refused "$?" 'the media helper ignores the release of the environment'
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 ''
+refused "$?" 'the media helper refuses a run without an architecture'
+err_has 'ARCH' 'the refusal of a run without an architecture names the architecture'
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 AMD64
+refused "$?" 'the media helper refuses an architecture that is not a lowercase name'
+err_has 'architecture' 'the refusal of a bad architecture names the architecture'
+# the architecture of the environment is ignored: the argument names an
+# architecture the media does not hold
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 aarch64 WTFBSD_ARCH=amd64 ARCH=amd64
+refused "$?" 'the media helper ignores the architecture of the environment'
+if grep -q '8\.0/aarch64' "$RUNBASE/err" 2> /dev/null; then
+	ok 'the refusal of a missing architecture names the release and the architecture'
+else
+	no 'the refusal of a missing architecture names the release and the architecture'
+fi
+
+# --- the tools of OpenBSD -------------------------------------------------
+
+printf '== the media helper needs OpenBSD and its tools ==\n'
+
+_mstub_linux=$work/mediastub-linux
+mkdir -p "$_mstub_linux"
+cp "$_mstub"/* "$_mstub_linux/"
+printf '#!/bin/sh\nprintf "Linux\\n"\n' > "$_mstub_linux/uname"
+chmod +x "$_mstub_linux"/*
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 PATH="$_mstub_linux:$PATH"
+refused "$?" 'the media helper refuses to run off OpenBSD'
+err_has 'OpenBSD' 'the refusal off OpenBSD names OpenBSD'
+
+_mstub_nord=$work/mediastub-nordsetroot
+mkdir -p "$_mstub_nord"
+cp "$_mstub"/* "$_mstub_nord/"
+rm -f "$_mstub_nord/rdsetroot"
+_mpath=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -v 'sbin$' | paste -s -d: -)
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 PATH="$_mstub_nord:$_mpath"
+refused "$?" 'the media helper refuses to run without rdsetroot'
+err_has 'rdsetroot' 'the refusal without rdsetroot names the tool'
+
+# --- the cleanup undoes only the steps that ran ---------------------------
+
+printf '== the cleanup of the media helper ==\n'
+
+# the attach of the ramdisk fails: the media was already unmounted and
+# detached, and the device that could not be attached is never named
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_VND_FAIL_ON=2
+refused "$?" 'the media helper fails when the ramdisk cannot be attached'
+_fu=$(grep -c '^umount ' "$RUNBASE/argv.log")
+_fd=$(grep -c '^vnconfig -u ' "$RUNBASE/argv.log")
 if [ "$_fu" -eq 1 ] && [ "$_fd" -eq 1 ]; then
 	ok 'the cleanup of the media helper unmounts and detaches once what was attached'
 else
 	no "the cleanup of the media helper unmounts and detaches once what was attached (umount: $_fu, vnconfig -u: $_fd)"
 fi
-if grep -q 'vnd1' "$_mlog3" 2> /dev/null; then
+if grep -q 'vnd1' "$RUNBASE/argv.log" 2> /dev/null; then
 	no 'the cleanup of the media helper never mentions the device it could not attach'
 else
 	ok 'the cleanup of the media helper never mentions the device it could not attach'
 fi
-if [ "$(grep '^mount ' "$_mlog3" 2> /dev/null | wc -l)" -eq 1 ]; then
+if [ "$(grep -c '^mount ' "$RUNBASE/argv.log")" -eq 1 ]; then
 	ok 'the cleanup of the media helper mounts nothing after the failure'
 else
 	no 'the cleanup of the media helper mounts nothing after the failure'
 fi
 
-# The cleanup undoes the attach when the mount of the media fails: the
-# device is detached, and no mount point is unmounted, because none was
-# mounted.
-_mlog4=$work/media-argv-mountfail.log
-: > "$_mlog4"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$_mlog4" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-mountfail" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-mountfail" \
-	WTFBSD_TEST_MOUNT_FAIL_ON=1 \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-3" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-mountfail.log" 2>&1; then
-	no 'the media helper fails when the media cannot be mounted'
-else
-	ok 'the media helper fails when the media cannot be mounted'
-fi
-if grep -q 'installNN\.iso' "$work/media-mountfail.log" 2> /dev/null; then
-	ok 'the refusal of a mount that fails names the image that is needed'
-else
-	no 'the refusal of a mount that fails names the image that is needed'
-fi
-if [ "$(grep '^umount ' "$_mlog4" 2> /dev/null | wc -l)" -eq 0 ]; then
+# the mount of the media fails: the device is detached, and nothing is
+# unmounted, because nothing was mounted
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_MOUNT_FAIL_ON=1
+refused "$?" 'the media helper fails when the media cannot be mounted'
+err_has 'installNN\.iso' 'the refusal of a mount that fails names the image that is needed'
+if [ "$(grep -c '^umount ' "$RUNBASE/argv.log")" -eq 0 ]; then
 	ok 'the cleanup of the media helper unmounts no mount point that was never mounted'
 else
 	no 'the cleanup of the media helper unmounts no mount point that was never mounted'
 fi
-if [ "$(grep '^vnconfig -u ' "$_mlog4" 2> /dev/null | wc -l)" -eq 1 ]; then
+if [ "$(grep -c '^vnconfig -u ' "$RUNBASE/argv.log")" -eq 1 ]; then
 	ok 'the cleanup of the media helper detaches the device it attached'
 else
 	no 'the cleanup of the media helper detaches the device it attached'
 fi
 
-# The release of the media is given, and it is never read out of the
-# name of the site set: site100.tgz is the site set of the release
-# 10.0, and the name of the file says nothing about the release. The
-# fourth argument is empty here: the helper has to refuse the run, not
-# the number of the arguments.
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-norelease.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-norelease" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-norelease" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-4" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" '' amd64 \
-	> "$work/media-norelease.log" 2>&1; then
-	no 'the media helper refuses to run without a release'
-else
-	ok 'the media helper refuses to run without a release'
-fi
-if grep -qi 'release' "$work/media-norelease.log" 2> /dev/null; then
-	ok 'the refusal of a run without a release names the release'
-else
-	no 'the refusal of a run without a release names the release'
-fi
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-badrelease.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-badrelease" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-badrelease" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-5" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0.1 amd64 \
-	> "$work/media-badrelease.log" 2>&1; then
-	no 'the media helper refuses a release that is not N.N'
-else
-	ok 'the media helper refuses a release that is not N.N'
-fi
-if grep -qi 'N.N' "$work/media-badrelease.log" 2> /dev/null; then
-	ok 'the refusal of a bad release names the shape of a release'
-else
-	no 'the refusal of a bad release names the shape of a release'
-fi
-# the release of the media is the one that was given, whatever the name
-# of the site set says
-: > "$work/spool/site100.tgz"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-release.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-release" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-release" \
-	WTFBSD_TEST_UMOUNT_TREE="$work/tree-release" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-6" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site100.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-release.log" 2>&1; then
-	ok 'the media helper takes the release that was given'
-else
-	no "the media helper takes the release that was given (see $work/media-release.log)"
-fi
-if [ -f "$work/tree-release/mnt-rd/8.0/amd64/site100.tgz" ] \
-	|| grep -q '8\.0/amd64/site100\.tgz' "$work/media-argv-release.log" 2> /dev/null; then
-	ok 'the site set lands in the directory of the release that was given'
-else
-	no 'the site set lands in the directory of the release that was given'
-fi
-# The release is never read out of the environment: the argument is the
-# only source of the release of the media. The fourth argument is empty
-# here, so the helper has to refuse the run.
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-envrelease.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-envrelease" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-envrelease" \
-	WTFBSD_RELEASE=8.0 \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-7" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" '' amd64 \
-	> "$work/media-envrelease.log" 2>&1; then
-	no 'the media helper ignores the release of the environment'
-else
-	ok 'the media helper ignores the release of the environment'
-fi
-if grep -qi 'release' "$work/media-envrelease.log" 2> /dev/null; then
-	ok 'the refusal of a run without a release names the release'
-else
-	no 'the refusal of a run without a release names the release'
-fi
-
-# The helper runs as root: it touches nothing outside the spool of the
-# media node, and it follows no link of the account of the job.
-ln -sf "$work/spool/site80.tgz" "$work/spool/site80-link.tgz"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-symlink.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-symlink" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-symlink" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-11" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80-link.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-symlink.log" 2>&1; then
-	no 'the media helper refuses a site set that is a symbolic link'
-else
-	ok 'the media helper refuses a site set that is a symbolic link'
-fi
-if grep -qi 'symbolic link' "$work/media-symlink.log" 2> /dev/null; then
-	ok 'the refusal of a symbolic link names the link'
-else
-	no 'the refusal of a symbolic link names the link'
-fi
-# a file that is not under the spool is refused
-: > "$work/outside.tgz"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-outside.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-outside" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-outside" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-12" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/outside.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-outside.log" 2>&1; then
-	no 'the media helper refuses a file that is not under the spool'
-else
-	ok 'the media helper refuses a file that is not under the spool'
-fi
-if grep -qi 'spool' "$work/media-outside.log" 2> /dev/null; then
-	ok 'the refusal of a file outside the spool names the spool'
-else
-	no 'the refusal of a file outside the spool names the spool'
-fi
-# a path with a ".." is refused, even when it points inside the spool
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-dotdot.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-dotdot" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-dotdot" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-13" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/../outside.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-dotdot.log" 2>&1; then
-	no 'the media helper refuses a path with a ..'
-else
-	ok 'the media helper refuses a path with a ..'
-fi
-# the spool has to exist
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-nospool.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-nospool" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-nospool" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-14" \
-	sh "$MEDIA_RUN_NOSPOOL" prepare "$work/no-such-spool/image.iso" "$work/no-such-spool/site80.tgz" "$work/no-such-spool/install.conf" 8.0 amd64 \
-	> "$work/media-nospool.log" 2>&1; then
-	no 'the media helper refuses a spool directory that does not exist'
-else
-	ok 'the media helper refuses a spool directory that does not exist'
-fi
-# the spool may not be writable by others
-mkdir -p "$work/spool-open"
-: > "$work/spool-open/image.iso"
-: > "$work/spool-open/site80.tgz"
-printf 'Location of sets = http\n' > "$work/spool-open/install.conf"
-chmod 0777 "$work/spool-open"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-openspool.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-openspool" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-openspool" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-15" \
-	sh "$MEDIA_RUN_OPEN" prepare "$work/spool-open/image.iso" "$work/spool-open/site80.tgz" "$work/spool-open/install.conf" 8.0 amd64 \
-	> "$work/media-openspool.log" 2>&1; then
-	no 'the media helper refuses a spool directory that others can write'
-else
-	ok 'the media helper refuses a spool directory that others can write'
-fi
-chmod 0755 "$work/spool-open"
-
-# A media that holds an index.txt: the site set is listed in it, and the
-# helper creates no index.txt anywhere else.
-_isotree2=$work/isotree-index
-cp -R "$_isotree" "$_isotree2"
-printf 'base.tgz\n' > "$_isotree2/8.0/amd64/index.txt"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-argv-index.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree2" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-index" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-index" \
-	WTFBSD_TEST_MKHYBRID_TREE="$work/mkhybrid-tree-index" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-16" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-index.log" 2>&1; then
-	ok 'the media helper prepares a media that holds an index.txt'
-else
-	no "the media helper prepares a media that holds an index.txt (see $work/media-index.log)"
-fi
-if [ -f "$work/mkhybrid-tree-index/8.0/amd64/index.txt" ] \
-	&& grep -qx 'site80.tgz' "$work/mkhybrid-tree-index/8.0/amd64/index.txt" 2> /dev/null; then
-	ok 'the media helper lists the site set in the index.txt of the media'
-else
-	no 'the media helper lists the site set in the index.txt of the media'
-fi
-if [ "$(grep -c '^site80\.tgz$' "$work/mkhybrid-tree-index/8.0/amd64/index.txt" 2> /dev/null)" -eq 1 ]; then
-	ok 'the media helper lists the site set once'
-else
-	no 'the media helper lists the site set once'
-fi
-if [ -e "$work/mkhybrid-tree-index/index.txt" ]; then
-	no 'the media helper creates no index.txt in the root of the CD'
-else
-	ok 'the media helper creates no index.txt in the root of the CD'
-fi
-
-# the helper refuses to run off OpenBSD
-_mstub2=$work/mediastub-linux
-mkdir -p "$_mstub2"
-cp "$_mstub/id" "$_mstub/vnconfig" "$_mstub/mount" "$_mstub/umount" \
-	"$_mstub/rdsetroot" "$_mstub/gzip" "$_mstub/mkhybrid" "$_mstub2/"
-cat > "$_mstub2/uname" <<'STUB'
-#!/bin/sh
-printf 'Linux\n'
-STUB
-chmod +x "$_mstub2"/*
-if env PATH="$_mstub2:$PATH" \
-	WTFBSD_TEST_ARGV="$work/media-linux-argv.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-8" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-linux.log" 2>&1; then
-	no 'the media helper refuses to run off OpenBSD'
-else
-	ok 'the media helper refuses to run off OpenBSD'
-fi
-if grep -q 'OpenBSD' "$work/media-linux.log" 2> /dev/null; then
-	ok 'the refusal off OpenBSD names OpenBSD'
-else
-	no 'the refusal off OpenBSD names OpenBSD'
-fi
-
-# the helper refuses to run without the tools of OpenBSD. The
-# directories that hold them are left out of the PATH, so rdsetroot(8)
-# is not found even on OpenBSD.
-_mstub3=$work/mediastub-nordsetroot
-mkdir -p "$_mstub3"
-cp "$_mstub/uname" "$_mstub/id" "$_mstub/vnconfig" "$_mstub/mount" "$_mstub/umount" \
-	"$_mstub/gzip" "$_mstub/mkhybrid" "$_mstub3/"
-chmod +x "$_mstub3"/*
-_mpath=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -v '/sbin$' | paste -s -d: -)
-if env PATH="$_mstub3:$_mpath" \
-	WTFBSD_TEST_ARGV="$work/media-nordsetroot-argv.log" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-9" \
-	sh "$MEDIA_RUN" prepare "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" 8.0 amd64 \
-	> "$work/media-nordsetroot.log" 2>&1; then
-	no 'the media helper refuses to run without rdsetroot'
-else
-	ok 'the media helper refuses to run without rdsetroot'
-fi
-if grep -q 'rdsetroot' "$work/media-nordsetroot.log" 2> /dev/null; then
-	ok 'the refusal without rdsetroot names the tool'
-else
-	no 'the refusal without rdsetroot names the tool'
-fi
-
-# the helper stops on a signal: the trap runs the cleanup and the script
-# exits with the code of the signal, so no step after the signal runs.
-# The run has a spool of its own: the work directory of a run that ends
-# with a mount up stays under the spool.
-mkdir -p "$work/spool-signal"
-cp "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" "$work/spool-signal/"
-_mlog2=$work/media-signal-argv.log
-: > "$_mlog2"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$_mlog2" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_MOUNT_SLEEP=2 \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-signal" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-signal" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-10" \
-	sh "$MEDIA_RUN_SIGNAL" prepare "$work/spool-signal/image.iso" "$work/spool-signal/site80.tgz" "$work/spool-signal/install.conf" 8.0 amd64 \
-	> "$work/media-signal.log" 2>&1 &
-then
-	_mpid=$!
-	sleep 1
-	kill -TERM "$_mpid" 2> /dev/null
-	_mrc=0
-	wait "$_mpid" || _mrc=$?
-	if [ "$_mrc" -eq 143 ]; then
-		ok 'the media helper exits with the code of the signal'
-	else
-		no "the media helper exits with the code of the signal (status $_mrc)"
-	fi
-	if [ -s "$_mlog2" ]; then
-		ok 'the media helper cleans up when it is signalled'
-	else
-		no 'the media helper cleans up when it is signalled'
-	fi
-	# the cleanup undoes what the helper had done: it detaches the
-	# device it attached, and it unmounts nothing outside the work
-	# directory of the run
-	if [ "$(grep '^vnconfig -u ' "$_mlog2" 2> /dev/null | wc -l)" -eq 1 ]; then
-		ok 'the cleanup of the media helper detaches the device it attached'
-	else
-		no 'the cleanup of the media helper detaches the device it attached'
-	fi
-	_su_out=$(grep '^umount ' "$_mlog2" 2> /dev/null | grep -v '/work\.' | wc -l)
-	if [ "$_su_out" -eq 0 ]; then
-		ok 'the cleanup of the media helper unmounts nothing outside its work directory'
-	else
-		no 'the cleanup of the media helper unmounts nothing outside its work directory'
-	fi
-	# the mount point that was up when the signal came is unmounted
-	_su_mnt=$(grep '^umount ' "$_mlog2" 2> /dev/null | head -1 | sed -e 's/^umount //')
-	case $_su_mnt in
-	"$work"/spool-signal/work.*/mnt) ok 'the cleanup of the media helper unmounts the mount point it mounted' ;;
-	*) no "the cleanup of the media helper unmounts the mount point it mounted (got: $_su_mnt)" ;;
-	esac
-	if [ "$(grep '^umount ' "$_mlog2" 2> /dev/null | wc -l)" -eq 1 ]; then
-		ok 'the cleanup of the media helper unmounts the mount point once'
-	else
-		no 'the cleanup of the media helper unmounts the mount point once'
-	fi
-	# the image is never rebuilt after the signal
-	if grep -q '^mkhybrid ' "$_mlog2" 2> /dev/null; then
-		no 'the media helper runs no step after a signal'
-	else
-		ok 'the media helper runs no step after a signal'
-	fi
-fi
-
-# The same signal, with an unmount that fails: the cleanup of the
-# signal and the cleanup of the exit run once, the mount that is still
-# up is reported, and the work directory of the run stays where it is.
-# The run has a spool of its own: the work directory of the run stays
-# under the spool of the run.
-mkdir -p "$work/spool-signal-fail"
-cp "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" "$work/spool-signal-fail/"
-_mlog6=$work/media-signal-argv-fail.log
-: > "$_mlog6"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$_mlog6" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_MOUNT_SLEEP=2 \
-	WTFBSD_TEST_UMOUNT_FAIL=mnt \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-signal-fail" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-signal-fail" \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-18" \
-	sh "$MEDIA_RUN_SIGNAL_FAIL" prepare "$work/spool-signal-fail/image.iso" "$work/spool-signal-fail/site80.tgz" "$work/spool-signal-fail/install.conf" 8.0 amd64 \
-	> "$work/media-signal-fail.log" 2>&1 &
-then
-	_mpid=$!
-	sleep 1
-	kill -TERM "$_mpid" 2> /dev/null
-	_mrc=0
-	wait "$_mpid" || _mrc=$?
-	if [ "$_mrc" -eq 143 ]; then
-		ok 'the media helper exits with the code of the signal when the unmount fails'
-	else
-		no "the media helper exits with the code of the signal when the unmount fails (status $_mrc)"
-	fi
-	if [ "$(grep '^umount ' "$_mlog6" 2> /dev/null | wc -l)" -eq 1 ]; then
-		ok 'the cleanup of the media helper runs once when it is signalled'
-	else
-		no 'the cleanup of the media helper runs once when it is signalled'
-	fi
-	if grep -q 'still mounted' "$work/media-signal-fail.log" 2> /dev/null; then
-		ok 'the cleanup of the media helper names the mount that is still up when it is signalled'
-	else
-		no 'the cleanup of the media helper names the mount that is still up when it is signalled'
-	fi
-	if ls -d "$work"/spool-signal-fail/work.* > /dev/null 2>&1; then
-		ok 'the work directory of the run stays where it is when the signal found a mount up'
-	else
-		no 'the work directory of the run stays where it is when the signal found a mount up'
-	fi
-fi
-
-# The unmount of the ramdisk fails: the helper fails, the cleanup tries
-# to unmount it again, the device is detached after the unmount, nothing
-# runs twice, and the work directory of the run stays where it is: the
-# tree of a mount that is still up lives under it. The run has a spool of
-# its own: the work directory stays under the spool of the run.
-mkdir -p "$work/spool-umount"
-cp "$work/spool/image.iso" "$work/spool/site80.tgz" "$work/spool/install.conf" "$work/spool-umount/"
-_mlog5=$work/media-argv-umountfail.log
-: > "$_mlog5"
-if env PATH="$_mstub:$PATH" \
-	WTFBSD_TEST_ARGV="$_mlog5" \
-	WTFBSD_TEST_ISO_TREE="$_isotree" \
-	WTFBSD_TEST_VND_COUNT="$work/vnd-count-umountfail" \
-	WTFBSD_TEST_MOUNT_COUNT="$work/mount-count-umountfail" \
-	WTFBSD_TEST_UMOUNT_FAIL=mnt-rd \
-	WTFBSD_TEST_VND_STATE="$work/vnd-state-17" \
-	sh "$MEDIA_RUN_UMOUNT" prepare "$work/spool-umount/image.iso" "$work/spool-umount/site80.tgz" "$work/spool-umount/install.conf" 8.0 amd64 \
-	> "$work/media-umountfail.log" 2>&1; then
-	no 'the media helper fails when the ramdisk cannot be unmounted'
-else
-	ok 'the media helper fails when the ramdisk cannot be unmounted'
-fi
-if grep -q 'still mounted' "$work/media-umountfail.log" 2> /dev/null; then
-	ok 'the cleanup of the media helper names the mount that is still up'
-else
-	no 'the cleanup of the media helper names the mount that is still up'
-fi
-_umn=$(grep -n '^umount .*/mnt-rd$' "$_mlog5" 2> /dev/null | tail -1 | cut -d: -f1)
-_den=$(grep -n '^vnconfig -u vnd1$' "$_mlog5" 2> /dev/null | tail -1 | cut -d: -f1)
+# the unmount of the ramdisk fails: the helper fails, the cleanup tries
+# again, detaches the device after the unmount, once, and the work
+# directory stays where it is (a mount under it is still up)
+runmedia "$MEDIA_RUN" "$IN_OK" 8.0 amd64 WTFBSD_TEST_UMOUNT_FAIL=mnt-rd
+refused "$?" 'the media helper fails when the ramdisk cannot be unmounted'
+err_has 'still mounted' 'the cleanup of the media helper names the mount that is still up'
+_umn=$(grep -n '^umount .*/mnt-rd$' "$RUNBASE/argv.log" | tail -n 1 | cut -d: -f1)
+_den=$(grep -n '^vnconfig -u vnd1$' "$RUNBASE/argv.log" | tail -n 1 | cut -d: -f1)
 if [ -n "$_umn" ] && [ -n "$_den" ] && [ "$_umn" -lt "$_den" ]; then
 	ok 'the cleanup of the media helper unmounts the ramdisk before it detaches its device'
 else
 	no 'the cleanup of the media helper unmounts the ramdisk before it detaches its device'
 fi
-if [ "$(grep -c '^vnconfig -u vnd1$' "$_mlog5" 2> /dev/null)" -eq 1 ]; then
+if [ "$(grep -c '^vnconfig -u vnd1$' "$RUNBASE/argv.log")" -eq 1 ]; then
 	ok 'the cleanup of the media helper detaches the device of the ramdisk once'
 else
 	no 'the cleanup of the media helper detaches the device of the ramdisk once'
 fi
-if ls -d "$work"/spool-umount/work.* > /dev/null 2>&1; then
+_kept=$(run_wd)
+if [ -n "$_kept" ] && [ -d "$_kept" ]; then
 	ok 'the work directory of the run stays where it is when a mount is still up'
 else
 	no 'the work directory of the run stays where it is when a mount is still up'
 fi
+rm_workdir "$_kept"
 
-# The architecture of the media is the architecture of the product: the
-# validate stage reads the DISTRO_ARCH of the product.conf and refuses a
-# media of another architecture.
+# --- the signals ----------------------------------------------------------
+
+printf '== the media helper stops on a signal ==\n'
+
+# signalled while the stock image is mounted: the trap cleans up and the
+# helper exits with the code of the signal, so no step after it runs
+runmedia_bg "$MEDIA_RUN" "$IN_OK" WTFBSD_TEST_MOUNT_SLEEP=2
+_sl=$RUNBASE/argv.log
+wait_log "$_sl" '^mount -t cd9660 '
+kill -TERM "$_bgpid" 2> /dev/null
+_mrc=0
+wait "$_bgpid" || _mrc=$?
+if [ "$_mrc" -eq 143 ]; then
+	ok 'the media helper exits with the code of the signal'
+else
+	no "the media helper exits with the code of the signal (status $_mrc)"
+fi
+if [ ! -s "$RUNBASE/out" ]; then
+	ok 'the media helper writes nothing to stdout when it is signalled'
+else
+	no 'the media helper writes nothing to stdout when it is signalled'
+fi
+_swd=$(run_wd)
+if [ "$(grep -c '^umount ' "$_sl")" -eq 1 ] && [ "$(grep -c '^vnconfig -u ' "$_sl")" -eq 1 ]; then
+	ok 'the media helper cleans up when it is signalled'
+else
+	no 'the media helper cleans up when it is signalled'
+fi
+case $(grep '^umount ' "$_sl" | head -n 1) in
+"umount $_swd/mnt") ok 'the cleanup of the media helper unmounts the mount point it mounted, nothing outside its work directory' ;;
+*) no "the cleanup of the media helper unmounts the mount point it mounted, nothing outside its work directory (got: $(grep '^umount ' "$_sl" | head -n 1))" ;;
+esac
+_su=$(grep -n '^umount ' "$_sl" | head -n 1 | cut -d: -f1)
+_sd=$(grep -n '^vnconfig -u ' "$_sl" | head -n 1 | cut -d: -f1)
+if [ -n "$_su" ] && [ -n "$_sd" ] && [ "$_su" -lt "$_sd" ]; then
+	ok 'the cleanup of a signal unmounts the media before it detaches its device'
+else
+	no 'the cleanup of a signal unmounts the media before it detaches its device'
+fi
+if grep -q '^gzip \|^rdsetroot \|^mkhybrid ' "$_sl" 2> /dev/null; then
+	no 'the media helper runs no step after a signal'
+else
+	ok 'the media helper runs no step after a signal'
+fi
+if [ -n "$_swd" ] && [ ! -e "$_swd" ]; then
+	ok 'the cleanup of a signal removes the work directory'
+else
+	no 'the cleanup of a signal removes the work directory'
+fi
+
+# the same signal, with an unmount that fails: the cleanup runs once, the
+# mount that is still up is named, the work directory stays
+runmedia_bg "$MEDIA_RUN" "$IN_OK" WTFBSD_TEST_MOUNT_SLEEP=2 WTFBSD_TEST_UMOUNT_FAIL=mnt
+_sl=$RUNBASE/argv.log
+wait_log "$_sl" '^mount -t cd9660 '
+kill -TERM "$_bgpid" 2> /dev/null
+_mrc=0
+wait "$_bgpid" || _mrc=$?
+if [ "$_mrc" -eq 143 ]; then
+	ok 'the media helper exits with the code of the signal when the unmount fails'
+else
+	no "the media helper exits with the code of the signal when the unmount fails (status $_mrc)"
+fi
+if [ "$(grep -c '^umount ' "$_sl")" -eq 1 ]; then
+	ok 'the cleanup of the media helper runs once when it is signalled'
+else
+	no 'the cleanup of the media helper runs once when it is signalled'
+fi
+err_has 'still mounted' 'the cleanup of the media helper names the mount that is still up when it is signalled'
+_kept=$(run_wd)
+if [ -n "$_kept" ] && [ -d "$_kept" ]; then
+	ok 'the work directory of the run stays where it is when the signal found a mount up'
+else
+	no 'the work directory of the run stays where it is when the signal found a mount up'
+fi
+rm_workdir "$_kept"
+
+# signalled in the middle of the attach, before the unit was read: the
+# cleanup finds the unit that covers the image with vnconfig -l
+runmedia_bg "$MEDIA_RUN" "$IN_OK" WTFBSD_TEST_VND_SLEEP=2
+_sl=$RUNBASE/argv.log
+wait_log "$_sl" "^vnconfig $STOCK_ISO\$"
+kill -TERM "$_bgpid" 2> /dev/null
+_mrc=0
+wait "$_bgpid" || _mrc=$?
+if [ "$_mrc" -eq 143 ]; then
+	ok 'the media helper exits with the code of the signal in the middle of the attach'
+else
+	no "the media helper exits with the code of the signal in the middle of the attach (status $_mrc)"
+fi
+if [ "$(grep -c '^vnconfig -u vnd0$' "$_sl")" -eq 1 ] && [ "$(grep -c '^vnconfig -l' "$_sl")" -ge 1 ]; then
+	ok 'the cleanup detaches the one unit the run attached, found by vnconfig -l'
+else
+	no 'the cleanup detaches the one unit the run attached, found by vnconfig -l'
+fi
+# that check can fail: with the match of vnconfig -l broken, the cleanup
+# detaches nothing
+sed 's/if (path == img)/if (0)/' "$MEDIA_RUN" > "$work/media-broken-unit.sh"
+if grep -q 'if (0)' "$work/media-broken-unit.sh"; then
+	runmedia_bg "$work/media-broken-unit.sh" "$IN_OK" WTFBSD_TEST_VND_SLEEP=2
+	_sl=$RUNBASE/argv.log
+	wait_log "$_sl" "^vnconfig $STOCK_ISO\$"
+	kill -TERM "$_bgpid" 2> /dev/null
+	wait "$_bgpid" 2> /dev/null
+	if [ "$(grep -c '^vnconfig -u ' "$_sl")" -eq 0 ]; then
+		ok 'a broken vnconfig -l match is caught: the cleanup detaches no unit'
+	else
+		no 'a broken vnconfig -l match is caught: the cleanup detaches no unit'
+	fi
+else
+	no 'the copy of the helper with a broken vnconfig -l match was made'
+fi
+
+# no work directory of the suite is left behind
+for _d in $(cat "$work"/run-*/mkd.log 2> /dev/null); do
+	rm_workdir "$_d"
+done
+
+# --- the Jenkinsfile: the media stage builds inputs.tar on stdin -------
+
+printf '== the Jenkinsfile: the media stage (inputs.tar on stdin) ==\n'
+
+_jfstage=$(jenkins_sh_with 'MEDIA_HELPER')
+
+# the media stage fails when the media node holds no stock image, unless
+# the build accepts a build without a boot test
+if [ -n "$_jfstage" ]; then
+	ok 'the media stage of the Jenkinsfile was found'
+else
+	no 'the media stage of the Jenkinsfile was found'
+fi
+if env -i PATH="$PATH" VM_LIST="$work/vmlist" ALLOW_NO_BOOT_TEST= \
+	PRODUCT_CONF="$CONF" PROFILE=appliance RELEASE=8.0 VM_PROVIDER=fake \
+	sh -c "$_jfstage" > "$work/medstage.log" 2>&1; then
+	no 'the media stage fails when the media node holds no stock image'
+else
+	ok 'the media stage fails when the media node holds no stock image'
+fi
+grep -q '/usr/local/share/wtfbsd-media/install80\.iso' "$work/medstage.log" 2>/dev/null \
+	&& ok 'the failure names the stock image of the media node' \
+	|| no 'the failure names the stock image of the media node'
+if env -i PATH="$PATH" VM_LIST="$work/vmlist" ALLOW_NO_BOOT_TEST=yes \
+	PRODUCT_CONF="$CONF" PROFILE=appliance RELEASE=8.0 VM_PROVIDER=fake \
+	sh -c "$_jfstage" > "$work/medstage2.log" 2>&1; then
+	ok 'the media stage skips when ALLOW_NO_BOOT_TEST says so'
+else
+	no 'the media stage skips when ALLOW_NO_BOOT_TEST says so'
+fi
+# the stock image is not an input of the job: no parameter names it and
+# the tar the stage feeds the helper does not carry it
+if grep -q 'STOCK_MEDIA' "$JF" 2>/dev/null; then
+	no 'the Jenkinsfile has no parameter for the stock image'
+else
+	ok 'the Jenkinsfile has no parameter for the stock image'
+fi
+if printf '%s\n' "$_jfstage" | grep -q 'install\.iso'; then
+	no 'the media stage puts no install image into the input of the helper'
+else
+	ok 'the media stage puts no install image into the input of the helper'
+fi
+
+# the helper needs root, and the media node grants it with doas.conf(5).
+# The rule names the installed copy of the helper, not the copy of the
+# workspace.
+if printf '%s\n' "$_jfstage" | grep -q 'doas "\$MEDIA_HELPER"'; then
+	ok 'the media stage runs the helper through doas'
+else
+	no 'the media stage runs the helper through doas'
+fi
+if printf '%s\n' "$_jfstage" | grep -q 'doas .*ci/media\.sh'; then
+	no 'the media stage runs no helper of the workspace'
+else
+	ok 'the media stage runs no helper of the workspace'
+fi
+if grep -q "name: 'MEDIA_HELPER'" "$JF" 2>/dev/null \
+	&& grep -q "defaultValue: '/usr/local/libexec/wtfbsd-media'" "$JF" 2>/dev/null; then
+	ok 'the Jenkinsfile names the installed helper of the media node'
+else
+	no 'the Jenkinsfile names the installed helper of the media node'
+fi
+
+# the stage is stopped by a trap on the signals: a trap on EXIT alone is
+# not run when the stage is killed, and a trap on a signal alone does not
+# exit, so the stage would run on after the signal.
+if printf '%s\n' "$_jfstage" | grep -q "trap 'cleanup' EXIT"; then
+	ok 'the media stage cleans up when it ends'
+else
+	no 'the media stage cleans up when it ends'
+fi
+if printf '%s\n' "$_jfstage" | grep -q "trap 'exit 129' HUP" \
+	&& printf '%s\n' "$_jfstage" | grep -q "trap 'exit 130' INT" \
+	&& printf '%s\n' "$_jfstage" | grep -q "trap 'exit 143' TERM"; then
+	ok 'the media stage exits with the code of the signal'
+else
+	no 'the media stage exits with the code of the signal'
+fi
+
+# the stage builds the inputs.tar and feeds it to the helper on stdin,
+# and the result comes out of the helper on stdout: no path argument at
+# all, so the job never names a path that root would follow.
+if printf '%s\n' "$_jfstage" | grep -q 'tar -c -F ustar -f inputs\.tar -C "\$inputs" site\.tgz install\.conf'; then
+	ok 'the media stage builds the inputs.tar'
+else
+	no 'the media stage builds the inputs.tar'
+fi
+if printf '%s\n' "$_jfstage" | grep -q '< inputs\.tar'; then
+	ok 'the media stage feeds the inputs.tar to the helper on stdin'
+else
+	no 'the media stage feeds the inputs.tar to the helper on stdin'
+fi
+if printf '%s\n' "$_jfstage" | grep -q 'prepare .*"\$RELEASE".*"\$ARCH"'; then
+	ok 'the media stage passes the release and the architecture only'
+else
+	no 'the media stage passes the release and the architecture only'
+fi
+if printf '%s\n' "$_jfstage" | grep -q '> media\.iso\.tmp' \
+	&& printf '%s\n' "$_jfstage" | grep -q 'mv media\.iso\.tmp media\.iso'; then
+	ok 'the media stage writes the image to stdout only after the run succeeded'
+else
+	no 'the media stage writes the image to stdout only after the run succeeded'
+fi
+
+# the release and the architecture are given to the helper
+if printf '%s\n' "$_jfstage" | grep -q '"\$RELEASE"'; then
+	ok 'the media stage gives the release to the helper'
+else
+	no 'the media stage gives the release to the helper'
+fi
+if printf '%s\n' "$_jfstage" | grep -q '"\$ARCH"'; then
+	ok 'the media stage gives the architecture to the helper'
+else
+	no 'the media stage gives the architecture to the helper'
+fi
+
+# the site set is named by its path, not a glob, so a file of another
+# build is never taken
+if printf '%s\n' "$_jfstage" | grep -q 'outdir=\./out'; then
+	ok 'the media stage knows the directory of the profile'
+else
+	no 'the media stage knows the directory of the profile'
+fi
+
+# the workspace of the node holds the files of the last build that ran
+# there: they go before the stash of this build
+_med_rm=$(grep -n 'rm -rf -- \./out media\.iso' "$JF" 2>/dev/null | head -1 | cut -d: -f1)
+_med_un=$(grep -n "unstash 'SITE_SET'" "$JF" 2>/dev/null | head -1 | cut -d: -f1)
+if [ -n "$_med_rm" ] && [ -n "$_med_un" ] && [ "$_med_rm" -lt "$_med_un" ]; then
+	ok 'the media stage removes the files of another build before the stash of this build'
+else
+	no 'the media stage removes the files of another build before the stash of this build'
+fi
+
+# the media stage runs on the node of the media label
+if grep -q 'agent { label "${params.MEDIA_AGENT_LABEL}" }' "$JF"; then
+	ok 'the media stage runs on the node of the media label'
+else
+	no 'the media stage runs on the node of the media label'
+fi
+# the image travels from the media stage to the boot test stage
+if grep -q "stash name: 'MEDIA_ISO'" "$JF"; then
+	ok 'the media stage stashes the image it prepared'
+else
+	no 'the media stage stashes the image it prepared'
+fi
+
+# --- the media stage and the helper, end to end ----------------------------
+
+printf '== the media stage feeds the helper a tar it accepts ==\n'
+
+# The tar(1) of OpenBSD writes pax by default ("the default format being
+# pax", tar(1)): a pax archive carries an extended header (type flag x)
+# that the helper refuses. The stage names the format.
+if printf '%s\n' "$_jfstage" | grep -q 'tar -c -F ustar -f inputs\.tar -C "\$inputs" site\.tgz install\.conf'; then
+	ok 'the media stage builds inputs.tar with -F ustar'
+else
+	no 'the media stage builds inputs.tar with -F ustar'
+fi
+if grep -q 'tar -c -F ustar -f inputs\.tar -C "\$inputs" site\.tgz install\.conf' "$repo/README.md" 2> /dev/null \
+	&& ! grep -q 'tar -cf inputs\.tar' "$repo/README.md" "$JF" 2> /dev/null; then
+	ok 'the README builds inputs.tar with -F ustar, and nothing builds it with the default format'
+else
+	no 'the README builds inputs.tar with -F ustar, and nothing builds it with the default format'
+fi
+
+# The stage shell runs against the helper copy of the suite: doas(1) runs
+# its command, and tar(1) behaves as the tar of OpenBSD, which writes pax
+# (with an extended header) unless -F ustar is given.
+_jstub=$work/jfstub
+mkdir -p "$_jstub"
+cat > "$_jstub/doas" <<'STUB'
+#!/bin/sh
+printf 'doas %s\n' "$*" >> "$WTFBSD_TEST_DOAS_LOG"
+exec "$@"
+STUB
+cat > "$_jstub/tar" <<'STUB'
+#!/bin/sh
+_real=$(command -p getconf PATH 2> /dev/null || printf /usr/bin:/bin)
+case ${1:-} in
+-c | -cf) ;;
+*) exec env PATH="$_real" tar "$@" ;;
+esac
+_fmt=pax
+_file=''
+[ "$1" = -cf ] && { _file=$2; shift; }
+shift
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	-F) _fmt=$2; shift 2 ;;
+	-f) _file=$2; shift 2 ;;
+	*) break ;;
+	esac
+done
+if env PATH="$_real" tar --version 2> /dev/null | grep -q GNU; then
+	case $_fmt in
+	ustar) set -- --format=ustar "$@" ;;
+	*) set -- --format=posix --pax-option=comment:=pax "$@" ;;
+	esac
+else
+	set -- --format "$_fmt" "$@"
+fi
+exec env PATH="$_real" tar -c -f "$_file" "$@"
+STUB
+chmod +x "$_jstub"/*
+
+cp "$MEDIA_RUN" "$work/media-stage-helper"
+chmod +x "$work/media-stage-helper"
+# media_stage <name> <stage shell> — run the stage in a directory of its
+# own, with out/site80.tgz and out/install.conf as the build writes them
+media_stage() {
+	_msd=$work/mstage-$1
+	mkdir -p "$_msd/out"
+	cp "$_staging/site.tgz" "$_msd/out/site80.tgz"
+	cp "$_staging/install.conf" "$_msd/out/install.conf"
+	: > "$_msd/doas.log"
+	: > "$_msd/argv.log"
+	( cd "$_msd" && env -i PATH="$_jstub:$_mstub:$PATH" HOME="$_msd" \
+		RELEASE=8.0 ARCH=amd64 PROFILE=appliance ALLOW_NO_BOOT_TEST= \
+		MEDIA_HELPER="$work/media-stage-helper" \
+		WTFBSD_TEST_DOAS_LOG="$_msd/doas.log" \
+		WTFBSD_TEST_UID="$_uid" \
+		WTFBSD_TEST_ARGV="$_msd/argv.log" \
+		WTFBSD_TEST_ISO_TREE="$_isotree" \
+		WTFBSD_TEST_MKDLOG="$_msd/mkd.log" \
+		WTFBSD_TEST_VND_COUNT="$_msd/vc" \
+		WTFBSD_TEST_MOUNT_COUNT="$_msd/mc" \
+		WTFBSD_TEST_VND_STATE="$_msd/vs" \
+		WTFBSD_TEST_MKHYBRID_TREE="$_msd/htree" \
+		sh -c "$2" > "$_msd/log" 2>&1 )
+}
+# the stock image check of the stage names the directory of the media
+# node; the suite points it at its own stock directory
+_jfstage_t=$(printf '%s\n' "$_jfstage" | sed "s|/usr/local/share/wtfbsd-media/|$STOCK/|")
+if printf '%s\n' "$_jfstage_t" | grep -q "$STOCK/install"; then
+	media_stage ok "$_jfstage_t"
+	_rc=$?
+	if [ "$_rc" -eq 0 ] && [ "$(cat "$_msd/media.iso" 2> /dev/null)" = 'the image of mkhybrid' ]; then
+		ok 'the media stage and the helper prepare media.iso end to end'
+	else
+		no "the media stage and the helper prepare media.iso end to end (status $_rc, see $_msd/log)"
+	fi
+	if cmp -s "$_msd/htree/8.0/amd64/site80.tgz" "$_staging/site.tgz"; then
+		ok 'the media stage stages the site set the build wrote (site80.tgz)'
+	else
+		no 'the media stage stages the site set the build wrote (site80.tgz)'
+	fi
+	if grep -q '^doas .*/media-stage-helper prepare 8\.0 amd64$' "$_msd/doas.log"; then
+		ok 'the media stage runs the helper through doas with the release and the architecture'
+	else
+		no 'the media stage runs the helper through doas with the release and the architecture'
+	fi
+	# those checks can fail: the stage with the default format of the
+	# tar of OpenBSD is refused by the helper, and the stage that copies
+	# out/site.tgz finds no site set
+	media_stage pax "$(printf '%s\n' "$_jfstage_t" | sed 's|tar -c -F ustar -f inputs\.tar|tar -cf inputs.tar|')"
+	if [ "$?" -ne 0 ] && grep -q 'type flag 0x78' "$_msd/log"; then
+		ok 'a stage that writes the default pax format is refused by the helper (type flag x)'
+	else
+		no 'a stage that writes the default pax format is refused by the helper (type flag x)'
+	fi
+	media_stage sitename "$(printf '%s\n' "$_jfstage_t" | sed 's|"\$outdir/site\$nn\.tgz"|"$outdir/site.tgz"|')"
+	if [ "$?" -ne 0 ] && grep -q 'cannot stage the site set' "$_msd/log"; then
+		ok 'a stage that copies out/site.tgz finds no site set'
+	else
+		no 'a stage that copies out/site.tgz finds no site set'
+	fi
+else
+	no 'the stage shell names the stock directory of the media node'
+fi
+
+# --- the build stage needs no root -----------------------------------------
+
+printf '== the Jenkinsfile runs doas for the media helper only ==\n'
+
+# Every doas(1) of the Jenkinsfile that is code (not a comment, not the
+# description of a parameter) is the one that runs the installed helper:
+# build.sh, a file of the workspace, never runs as root.
+_jfdoas=$(grep -n 'doas' "$JF" 2> /dev/null | grep -v "description:" \
+	| grep -v '^[0-9]*:[[:space:]]*#' | grep -v '^[0-9]*:[[:space:]]*//')
+if [ "$(printf '%s\n' "$_jfdoas" | grep -c .)" -eq 1 ] \
+	&& printf '%s\n' "$_jfdoas" | grep -q 'doas "\$MEDIA_HELPER" prepare'; then
+	ok 'the Jenkinsfile runs doas only for the installed media helper'
+else
+	no "the Jenkinsfile runs doas only for the installed media helper (got: $_jfdoas)"
+fi
+if grep -q 'doas.*build\.sh' "$JF" "$repo/README.md" 2> /dev/null; then
+	no 'neither the Jenkinsfile nor the README runs build.sh through doas'
+else
+	ok 'neither the Jenkinsfile nor the README runs build.sh through doas'
+fi
+_bstage=$(jenkins_sh_with 'build.sh "')
+if printf '%s\n' "$_bstage" | grep -q '^[[:space:]]*\./build\.sh "\$@"$'; then
+	ok 'the build stage runs build.sh as the account of the job'
+else
+	no 'the build stage runs build.sh as the account of the job'
+fi
+
+
+# --- the validate stage: the architecture is the one of the product ---
+
+printf '== the validate stage: the architecture of the product ==\n'
+
 _valstage=$(jenkins_sh_with 'DISTRO_ARCH')
 if [ -n "$_valstage" ]; then
 	ok 'the validate stage of the Jenkinsfile was found'
@@ -3408,167 +4051,11 @@ if env -i PATH="$PATH" VM_LIST="$work/vmlist" RELEASE=8.0 PROFILE=appliance \
 else
 	ok 'the validate stage refuses an architecture that is not the one of the product'
 fi
-if grep -q 'DISTRO_ARCH' "$work/valstage2.log" 2> /dev/null; then
+if grep -q 'DISTRO_ARCH' "$work/valstage2.log" 2>/dev/null; then
 	ok 'the refusal of an architecture names DISTRO_ARCH'
 else
 	no 'the refusal of an architecture names DISTRO_ARCH'
 fi
-
-# the media stage fails when there is no media, unless the build says
-# that it accepts a build without a boot test
-_stage=$(jenkins_sh_with 'STOCK_MEDIA')
-if [ -n "$_stage" ]; then
-	ok 'the media stage of the Jenkinsfile was found'
-else
-	no 'the media stage of the Jenkinsfile was found'
-fi
-if env -i PATH="$PATH" VM_LIST="$work/vmlist" STOCK_MEDIA= ALLOW_NO_BOOT_TEST= \
-	PRODUCT_CONF="$CONF" PROFILE=appliance RELEASE=8.0 VM_PROVIDER=fake \
-	ARCH=amd64 MEDIA_SPOOL=/var/spool/wtfbsd-media \
-	sh -c "$_stage" > "$work/stage.log" 2>&1; then
-	no 'the media stage fails when STOCK_MEDIA is empty'
-else
-	ok 'the media stage fails when STOCK_MEDIA is empty'
-fi
-grep -q 'STOCK_MEDIA' "$work/stage.log" 2> /dev/null \
-	&& ok 'the failure names STOCK_MEDIA' || no 'the failure names STOCK_MEDIA'
-if env -i PATH="$PATH" VM_LIST="$work/vmlist" STOCK_MEDIA= ALLOW_NO_BOOT_TEST=yes \
-	PRODUCT_CONF="$CONF" PROFILE=appliance RELEASE=8.0 VM_PROVIDER=fake \
-	ARCH=amd64 MEDIA_SPOOL=/var/spool/wtfbsd-media \
-	sh -c "$_stage" > "$work/stage2.log" 2>&1; then
-	ok 'the media stage skips when ALLOW_NO_BOOT_TEST says so'
-else
-	no 'the media stage skips when ALLOW_NO_BOOT_TEST says so'
-fi
-# the copy of the media is removed by a trap
-if printf '%s\n' "$_stage" | grep -q 'trap'; then
-	ok 'the media stage removes the copy of the media with a trap'
-else
-	no 'the media stage removes the copy of the media with a trap'
-fi
-# a trap on a signal alone does not exit: the stage would run on after
-# the signal, and the copies of the spool would stay
-if printf '%s\n' "$_stage" | grep -q "trap 'cleanup' EXIT"; then
-	ok 'the media stage removes the copies of the spool when it ends'
-else
-	no 'the media stage removes the copies of the spool when it ends'
-fi
-if printf '%s\n' "$_stage" | grep -q "trap 'exit 129' HUP" \
-	&& printf '%s\n' "$_stage" | grep -q "trap 'exit 130' INT" \
-	&& printf '%s\n' "$_stage" | grep -q "trap 'exit 143' TERM"; then
-	ok 'the media stage exits with the code of the signal'
-else
-	no 'the media stage exits with the code of the signal'
-fi
-# the helper is installed on the media node: the stage says what to
-# install when it is not there
-if printf '%s\n' "$_stage" | grep -q 'the media helper is missing on the media node'; then
-	ok 'the media stage names the helper it needs'
-else
-	no 'the media stage names the helper it needs'
-fi
-if printf '%s\n' "$_stage" | grep -q 'no spool directory'; then
-	ok 'the media stage names the spool it needs'
-else
-	no 'the media stage names the spool it needs'
-fi
-# the spool is the constant of the helper: doas(1) resets the
-# environment of the run, so the two must agree on the directory
-if printf '%s\n' "$_stage" | grep -q '/var/spool/wtfbsd-media'; then
-	ok 'the media stage uses the spool of the helper'
-else
-	no 'the media stage uses the spool of the helper'
-fi
-if grep -q "name: 'MEDIA_SPOOL'" "$JF" 2> /dev/null \
-	&& grep -q "name: 'ARCH'" "$JF" 2> /dev/null \
-	&& grep -q "defaultValue: '/var/spool/wtfbsd-media'" "$JF" 2> /dev/null; then
-	ok 'the Jenkinsfile names the spool and the architecture of the media'
-else
-	no 'the Jenkinsfile names the spool and the architecture of the media'
-fi
-# the helper needs root, and the media node grants it with doas.conf(5).
-# The rule names the installed copy of the helper: the account of the
-# job can rewrite the file of its own workspace.
-if printf '%s\n' "$_stage" | grep -q 'doas "\$MEDIA_HELPER"'; then
-	ok 'the media stage runs the helper through doas'
-else
-	no 'the media stage runs the helper through doas'
-fi
-if printf '%s\n' "$_stage" | grep -q 'doas .*ci/media\.sh'; then
-	no 'the media stage runs no helper of the workspace'
-else
-	ok 'the media stage runs no helper of the workspace'
-fi
-if grep -q "name: 'MEDIA_HELPER'" "$JF" 2> /dev/null \
-	&& grep -q "defaultValue: '/usr/local/libexec/wtfbsd-media'" "$JF" 2> /dev/null; then
-	ok 'the Jenkinsfile names the installed helper of the media node'
-else
-	no 'the Jenkinsfile names the installed helper of the media node'
-fi
-# the release is given to the helper
-if printf '%s\n' "$_stage" | grep -q '"\$RELEASE"'; then
-	ok 'the media stage gives the release to the helper'
-else
-	no 'the media stage gives the release to the helper'
-fi
-# the architecture is given to the helper
-if printf '%s\n' "$_stage" | grep -q '"\$ARCH"'; then
-	ok 'the media stage gives the architecture to the helper'
-else
-	no 'the media stage gives the architecture to the helper'
-fi
-# the site set and the response file are named by the exact path of the
-# profile: a glob would take the file of another build
-if printf '%s\n' "$_stage" | grep -q 'ls .*out/'; then
-	no 'the media stage names the site set by its path and takes no file of a glob'
-else
-	ok 'the media stage names the site set by its path and takes no file of a glob'
-fi
-if printf '%s\n' "$_stage" | grep -q 'outdir=\./out'; then
-	ok 'the media stage knows the directory of the profile'
-else
-	no 'the media stage knows the directory of the profile'
-fi
-# the workspace of the node holds the files of the last build that ran
-# there: they go before the stash of this build
-_med_rm=$(grep -n 'rm -rf -- \./out media\.iso' "$JF" 2> /dev/null | head -1 | cut -d: -f1)
-_med_un=$(grep -n "unstash 'SITE_SET'" "$JF" 2> /dev/null | head -1 | cut -d: -f1)
-if [ -n "$_med_rm" ] && [ -n "$_med_un" ] && [ "$_med_rm" -lt "$_med_un" ]; then
-	ok 'the media stage removes the files of another build before the stash of this build'
-else
-	no 'the media stage removes the files of another build before the stash of this build'
-fi
-# the boot test never boots the image of another build
-_boot_rm=$(grep -n 'rm -f -- media\.iso' "$JF" 2> /dev/null | head -1 | cut -d: -f1)
-_boot_un=$(grep -n "unstash 'MEDIA_ISO'" "$JF" 2> /dev/null | head -1 | cut -d: -f1)
-if [ -n "$_boot_rm" ] && [ -n "$_boot_un" ] && [ "$_boot_rm" -lt "$_boot_un" ]; then
-	ok 'the boot test stage removes the image of another build before the stash of this build'
-else
-	no 'the boot test stage removes the image of another build before the stash of this build'
-fi
-# the media stage runs on the node of the media label
-if grep -q 'MEDIA_AGENT_LABEL' "$JF"; then
-	ok 'the Jenkinsfile takes the label of the media node'
-else
-	no 'the Jenkinsfile takes the label of the media node'
-fi
-if grep -q 'agent { label "${params.MEDIA_AGENT_LABEL}" }' "$JF"; then
-	ok 'the media stage runs on the node of the media label'
-else
-	no 'the media stage runs on the node of the media label'
-fi
-# the image travels from the media stage to the boot test stage
-if grep -q "stash name: 'MEDIA_ISO'" "$JF"; then
-	ok 'the media stage stashes the image it prepared'
-else
-	no 'the media stage stashes the image it prepared'
-fi
-if grep -q "unstash 'MEDIA_ISO'" "$JF"; then
-	ok 'the boot test stage unstashes the image'
-else
-	no 'the boot test stage unstashes the image'
-fi
-
 # the boot test stage fails when the media stage prepared no image,
 # unless the build says that it accepts a build without a boot test
 _bootstage=$(jenkins_sh_with 'boot-test.sh')
@@ -3577,7 +4064,7 @@ if [ -n "$_bootstage" ]; then
 else
 	no 'the boot test stage of the Jenkinsfile was found'
 fi
-if env -i PATH="$PATH" VM_LIST="$work/vmlist" STOCK_MEDIA= ALLOW_NO_BOOT_TEST= \
+if env -i PATH="$PATH" VM_LIST="$work/vmlist" ALLOW_NO_BOOT_TEST= \
 	PRODUCT_CONF="$CONF" PROFILE=appliance RELEASE=8.0 VM_PROVIDER=fake \
 	sh -c "$_bootstage" > "$work/bootstage.log" 2>&1; then
 	no 'the boot test stage fails when no image was prepared'
@@ -3587,7 +4074,7 @@ fi
 grep -q 'media.iso' "$work/bootstage.log" 2> /dev/null \
 	&& ok 'the failure of the boot test stage names the image' \
 	|| no 'the failure of the boot test stage names the image'
-if env -i PATH="$PATH" VM_LIST="$work/vmlist" STOCK_MEDIA= ALLOW_NO_BOOT_TEST=yes \
+if env -i PATH="$PATH" VM_LIST="$work/vmlist" ALLOW_NO_BOOT_TEST=yes \
 	PRODUCT_CONF="$CONF" PROFILE=appliance RELEASE=8.0 VM_PROVIDER=fake \
 	sh -c "$_bootstage" > "$work/bootstage2.log" 2>&1; then
 	ok 'the boot test stage skips when ALLOW_NO_BOOT_TEST says so'
