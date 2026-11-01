@@ -13,12 +13,14 @@
 # Environment:
 #   WTFBSD_REPO   the repository to test (default: the parent of this
 #                 directory). Point it at a copy to test a variant.
+#   WTFBSD_KEEP   set: keep the work directory of the run (to debug a
+#                 failure); it is removed otherwise
 
 set -u
 
 repo=${WTFBSD_REPO:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}
 work=$(mktemp -d "${TMPDIR:-/tmp}/wtfbsd-obsd-tests.XXXXXX") || exit 1
-trap 'rm -rf "$work"' EXIT HUP INT TERM
+[ -n "${WTFBSD_KEEP:-}" ] || trap 'rm -rf "$work"' EXIT HUP INT TERM
 pass=0
 fail=0
 ok() { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
@@ -27,7 +29,11 @@ no() { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; }
 BUILD="$repo/build.sh"
 VM="$repo/ci/vm.sh"
 BOOTTEST="$repo/tests/boot-test.sh"
-CONF="$repo/tests/fixtures/openbsd-product.conf"
+# the fixture product.conf, offline: the suite never clones the pinned
+# installer-template or artwork template (the tests of the pins name them)
+CONF_FIXTURE="$repo/tests/fixtures/openbsd-product.conf"
+CONF="$work/fixture-product.conf"
+{ cat "$CONF_FIXTURE"; printf "INSTALLER_REF='none'\nARTWORK_REF='none'\n"; } > "$CONF"
 JF="$repo/Jenkinsfile"
 
 # The public key of the operator account. The type and the key material are
@@ -162,7 +168,11 @@ leak_files() {
 scan_generic_refs() {
 	leak_files "$1"
 	[ -s "$work/.leak-files" ] || return 0
-	( cd "$1" && xargs -0 grep -H -E -o -i "$_PAT" < "$work/.leak-files" 2> /dev/null ) \
+	# the placeholders of the templates (@SLUG@, @DISTRO_NAME@, ...) are
+	# not addresses: each file is scanned with them taken out
+	( cd "$1" && xargs -0 sh -c 'for f; do
+		sed -E "s/@[A-Z][A-Z0-9_]*@/_/g" "$f" | grep -E -o -i "$0" | sed "s|^|$f:|"
+	done' "$_PAT" < "$work/.leak-files" 2> /dev/null ) \
 		| grep -E -v "^[^:]*:($_OK)$" \
 		| sed 's/^\([^:]*\):.*/\1/' \
 		| sort -u
@@ -847,7 +857,8 @@ grep -q -F -x "Password for user = $HASH" "$work/out-dpw/install.conf" 2> /dev/n
 
 # The CI archives the redacted response file and never the response file
 # itself: an archived artefact must not carry a secret.
-_art=$(grep -o "artifacts: *['\"][^'\"]*['\"]" "$JF" 2> /dev/null | head -1 \
+# (the archive of the live image in the media stage is not this one)
+_art=$(grep -o "artifacts: *['\"][^'\"]*['\"]" "$JF" 2> /dev/null | grep -v 'live\.img' | head -1 \
 	| sed -e "s/^artifacts: *['\"]//" -e "s/['\"]$//")
 if [ -n "$_art" ]; then
 	ok 'the archive pattern of the Jenkinsfile was found'
@@ -4089,8 +4100,9 @@ printf '== the Jenkinsfile runs doas for the media helper only ==\n'
 # build.sh, a file of the workspace, never runs as root.
 _jfdoas=$(grep -n 'doas' "$JF" 2> /dev/null | grep -v "description:" \
 	| grep -v '^[0-9]*:[[:space:]]*#' | grep -v '^[0-9]*:[[:space:]]*//')
-if [ "$(printf '%s\n' "$_jfdoas" | grep -c .)" -eq 1 ] \
-	&& printf '%s\n' "$_jfdoas" | grep -q 'doas "\$MEDIA_HELPER" prepare'; then
+# two runs: the install CD (prepare) and the live image of the desktop (live)
+if [ "$(printf '%s\n' "$_jfdoas" | grep -c .)" -eq 2 ] \
+	&& [ "$(printf '%s\n' "$_jfdoas" | grep -c 'doas "\$MEDIA_HELPER" \(prepare\|live\) "\$RELEASE" "\$ARCH"')" -eq 2 ]; then
 	ok 'the Jenkinsfile runs doas only for the installed media helper'
 else
 	no "the Jenkinsfile runs doas only for the installed media helper (got: $_jfdoas)"
@@ -4453,6 +4465,10 @@ if grep -n 'rm -rf' "$repo/AGENTS.md" 2> /dev/null | grep -qi 'jenkinsfile'; the
 else
 	no 'the rm -rf rule of AGENTS.md names the exception of the Jenkinsfile'
 fi
+
+# the live image: the live set, the live verb, the install command
+# shellcheck source=tests/live-tests.sh
+. "$repo/tests/live-tests.sh"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

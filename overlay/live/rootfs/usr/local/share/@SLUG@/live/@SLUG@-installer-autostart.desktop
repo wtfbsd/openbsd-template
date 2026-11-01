@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Install @DISTRO_NAME@
+Comment=The installer of the live image, opened first
+Exec=/usr/local/libexec/@SLUG@/open-installer
+Terminal=false
+X-XFCE-Autostart-Override=true

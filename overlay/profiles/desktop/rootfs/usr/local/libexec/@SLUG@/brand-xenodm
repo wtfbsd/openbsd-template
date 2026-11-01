@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# brand-xenodm ROOT — give the xenodm(1) greeter of the system at ROOT the
+# branding of @DISTRO_NAME@: its logo, name and colours, a background, and
+# the identity line in the lower left corner. No OpenBSD default (Puffy,
+# the host name greeting, the weave background) stays in effect. With the
+# pack of the artwork template (Xresources.pack) its files replace
+# OpenBSD's; without it the branding of this template is appended.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Run by the installer (@SLUG@-install) and by install.site. It appends to
+# the files of xenodm once (a marker line), so a second run changes nothing.
+
+set -u
+root=${1:-/}
+root=${root%/}
+src=$root/usr/local/share/@SLUG@/xenodm
+dir=$root/etc/X11/xenodm
+marker='# @SLUG@ branding'
+[ -d "$dir" ] || { echo "brand-xenodm: no $dir" >&2; exit 1; }
+[ -f "$src/Xresources" ] || { echo "brand-xenodm: no $src/Xresources" >&2; exit 1; }
+rc=0
+if [ -f "$src/Xresources.pack" ]; then
+	# the artwork template's login box and screen setup replace OpenBSD's
+	# (kept once as <file>.openbsd); its logos go in xenodm's pixmaps
+	for f in Xresources Xsetup_0; do
+		[ -f "$dir/$f.openbsd" ] || [ ! -f "$dir/$f" ] || cp -p "$dir/$f" "$dir/$f.openbsd" || rc=1
+		cp "$src/$f.pack" "$dir/$f" || rc=1
+	done
+	chmod 0755 "$dir/Xsetup_0" || rc=1
+	mkdir -p "$dir/pixmaps" && cp "$src"/pixmaps/*.xpm "$dir/pixmaps/" || rc=1
+elif ! grep -q '^! @SLUG@ branding' "$dir/Xresources" 2> /dev/null; then
+	cat "$src/Xresources" >> "$dir/Xresources" || rc=1
+fi
+# The identity line goes when a session starts: display :0 runs GiveConsole
+# as its startup (xenodm-config), the other displays Xstartup.
+for f in Xsetup_0 Xstartup GiveConsole; do
+	[ -f "$dir/$f" ] || continue
+	a=$src/Xsetup.append
+	[ "$f" = Xsetup_0 ] || a=$src/Xstartup.append
+	if ! grep -q "^$marker" "$dir/$f"; then
+		# Xstartup may end with "exit 0" or an exec: the lines go before it
+		if [ "$f" != Xsetup_0 ] && grep -Eq '^(exit 0|exec )' "$dir/$f"; then
+			a="$a" awk 'BEGIN { a = ENVIRON["a"] } /^(exit 0$|exec )/ && !done { while ((getline l < a) > 0) print l; done = 1 } { print }' \
+				"$dir/$f" > "$dir/$f.new" && cat "$dir/$f.new" > "$dir/$f" && rm -f "$dir/$f.new" || rc=1
+		else
+			cat "$a" >> "$dir/$f" || rc=1
+		fi
+	fi
+done
+exit "$rc"

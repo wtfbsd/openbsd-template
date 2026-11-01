@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Install @DISTRO_NAME@
+Comment=Install @DISTRO_NAME@ onto a disk of this machine
+Exec=/usr/local/libexec/@SLUG@/open-installer
+Icon=system-software-install
+Terminal=false
+Categories=System;

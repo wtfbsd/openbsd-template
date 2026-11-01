@@ -1,0 +1,33 @@
+#!/bin/sh
+#
+# installer-apply — the stand-in of the installer's root helper.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Live image only. The live user runs it as root through doas(1) (the one
+# root rule of the live image); install-into-stage.sh of the
+# installer-template replaces it with the helper of the installer. This
+# stand-in takes the arguments of @SLUG@-install and runs it, after checking
+# that the files it names (-H, -k) belong to the user who called doas: root
+# never reads a file of another account on the user's behalf.
+
+set -u
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin
+export PATH
+inst=/usr/local/sbin/@SLUG@-install
+[ "$(id -u)" = 0 ] || { printf 'ERROR installer-apply runs as root (doas)\n'; exit 1; }
+caller=${DOAS_USER:-}
+[ -n "$caller" ] || { printf 'ERROR installer-apply is run through doas(1)\n'; exit 1; }
+uid=$(id -u "$caller" 2> /dev/null) || { printf 'ERROR unknown caller\n'; exit 1; }
+
+prev=''
+for a in "$@"; do
+	case $prev in
+		-H | -k)
+			[ -f "$a" ] && [ ! -L "$a" ] || { printf 'ERROR not a regular file: %s\n' "$a"; exit 1; }
+			[ "$(stat -f %u "$a")" = "$uid" ] || { printf 'ERROR the file is not the caller'"'"'s: %s\n' "$a"; exit 1; }
+			;;
+	esac
+	prev=$a
+done
+exec "$inst" "$@"

@@ -1,0 +1,11 @@
+# rc.conf.local — the live fragment (live image only).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# build.sh appends it to the base file and the fragment of the desktop
+# profile, and the result goes into the live set only: the live image logs
+# the live user in (rc.d/@SLUG@_live) instead of showing the greeter of
+# xenodm(1). The installed system has the file of the site set, with
+# xenodm(1) and without this fragment.
+xenodm_flags=NO
+pkg_scripts="${pkg_scripts} @SLUG@_live"

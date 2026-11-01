@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# autologin-x — the X server on the console, with the session of one
+# account (rc.d/@SLUG@_autologin; the account is the only argument).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/X11R6/bin:/usr/local/sbin:/usr/local/bin
+export PATH
+user=${1:-}
+case $user in
+	'' | *[!a-z0-9_-]*) echo "autologin-x: not an account: $user" >&2; exit 1 ;;
+esac
+id "$user" > /dev/null 2>&1 || { echo "autologin-x: no such account: $user" >&2; exit 1; }
+[ "$(id -u "$user")" != 0 ] || { echo 'autologin-x: never root' >&2; exit 1; }
+S=@SLUG@
+AUTH=/var/run/$S-autologin.xauth
+while :; do
+	rm -f "$AUTH"
+	umask 077
+	: > "$AUTH"
+	xauth -q -f "$AUTH" add :0 . "$(openssl rand -hex 16)"
+	umask 022
+	XAUTHORITY=$AUTH
+	export XAUTHORITY
+	AUTOLOGIN_USER=$user
+	export AUTOLOGIN_USER
+	xinit /usr/local/libexec/$S/autologin-session -- /usr/X11R6/bin/X :0 vt05 \
+		-nolisten tcp -auth "$AUTH" > "/var/log/$S-autologin.log" 2>&1
+	sleep 3
+done

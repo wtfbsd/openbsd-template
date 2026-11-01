@@ -18,6 +18,50 @@ OpenBSD has for exactly this.
 
 License: BSD-2-Clause (see `LICENSE`).
 
+## What it looks like
+
+The live image of the desktop, ExampleBSD on **OpenBSD 8.0** (amd64), on a
+virtual machine (bhyve, UEFI, 1280x1024), driven with the keyboard alone (see
+[The pointer under bhyve](#the-pointer-under-bhyve)).
+
+The boot loader of OpenBSD 8.0 (it has no splash screen):
+
+![The OpenBSD 8.0 boot loader](docs/screenshots/boot.png)
+
+The live system logs the live user in and opens the installer first,
+full screen, with the identity line in its lower left corner:
+
+![The installer opens first on the live desktop (OpenBSD 8.0)](docs/screenshots/installer-first.png)
+
+"Try the live desktop" closes it into Xfce; the "Install ExampleBSD" icon
+and the menu entry open it again:
+
+![The live desktop with the Install icon (OpenBSD 8.0)](docs/screenshots/live-desktop.png)
+
+The disk page: the disks OpenBSD detects (fdisk, disklabel, bioctl; the
+live disk is not listed), the layouts this template offers (single disk,
+softraid CRYPTO; RAID 1 and RAID 1C with two disks or more) and the plan
+before and after:
+
+![The disk page (OpenBSD 8.0)](docs/screenshots/disk.png)
+
+Installing (the install command reports its progress to the installer):
+
+![Installing (OpenBSD 8.0)](docs/screenshots/installing.png)
+
+![Finished (OpenBSD 8.0)](docs/screenshots/finished.png)
+
+The installed system (OpenBSD 8.0) shows the greeter of xenodm(1) with the
+branding of the artwork template: the product's logo and name (no Puffy),
+its colours, and the identity line lower left; no automatic login:
+
+![The login screen of the installed OpenBSD 8.0 system](docs/screenshots/login.png)
+
+The account created in the installer, logged in to Xfce, on the wallpaper
+of the artwork template stamped with the identity line (lower left):
+
+![The Xfce desktop of the installed OpenBSD 8.0 system](docs/screenshots/desktop.png)
+
 ## Layout
 
 ```
@@ -109,7 +153,7 @@ mention at all. Keep it that way.
 | profile     | what it builds |
 |-------------|----------------|
 | `appliance` | headless: the serial console is the system console, `sshd` runs with its default arguments and only accepts keys (`PermitRootLogin no`, `PasswordAuthentication no`), no extra packages. |
-| `desktop`   | X11 only: the base Xenocara plus the `xfce` package, the X server is started by `xenodm(1)` (`xenodm_flags=` in the fragment of the profile) and the session of a new account is the Xfce session (`/etc/skel/.xsession` and `/etc/skel/.xinitrc`). **No Wayland anywhere and no display manager** (no LightDM). `sshd` is disabled on purpose (`sshd_flags=NO`): OpenBSD starts it by default. |
+| `desktop`   | X11 only: the base Xenocara plus the `xfce` package, the X server is started by `xenodm(1)` (`xenodm_flags=` in the fragment of the profile) and the session of a new account is the Xfce session (`/etc/skel/.xsession` and `/etc/skel/.xinitrc`). **No Wayland anywhere and no display manager** (no LightDM). `sshd` is disabled on purpose (`sshd_flags=NO`): OpenBSD starts it by default. The desktop also builds the live set and the live image (see [The live image](#the-live-image-desktop)). |
 
 The appliance ships no `/etc/boot.conf`: the installer writes the
 `stty com0 115200` and `set tty com0` lines of `boot.conf(8)` itself,
@@ -410,6 +454,286 @@ failure:
   operator sees it when they log in;
 - `install.site` exits non-zero, so the installer reports the install as
   failed instead of handing over a system that is missing a package.
+
+## The live image (desktop)
+
+The desktop also ships a **live image**: a disk image (GPT, an EFI system
+partition and one FFS root) holding a whole installed OpenBSD with the
+desktop, that boots straight into Xfce as the user `live` with the
+graphical installer open first. It is written to a USB stick with `dd(1)`
+and boots on UEFI and BIOS machines. OpenBSD has no stock live system, so
+the image is built the way `install.sub` installs a system.
+
+### What the build writes
+
+A desktop build writes, next to the site set, the **live set**
+`out/live80.tgz` (a POSIX ustar archive, members owned `0:0`):
+
+```
+etc/rc.d/<slug>_live                     the live session (rc.d(8)), live only
+etc/rc.conf.local                        base + desktop fragment + overlay/live/rc.conf.local
+                                         (xenodm_flags=NO, pkg_scripts += <slug>_live)
+etc/doas.conf                            permit nopass live as root
+                                         cmd /usr/local/libexec/wtfbsd-installer/installer-apply
+usr/local/libexec/<slug>/live-x          root: X on the console, logged in as live
+usr/local/libexec/<slug>/live-session    the X client: xhost, then su -l live
+usr/local/libexec/<slug>/live-user-session  the installer autostart, then startxfce4
+usr/local/sbin/<slug>-install            the install command (below)
+usr/local/bin/wtfbsd-installer           the launcher: the installer-template's, or the
+                                         stand-in text installer (live-tui) in an xterm
+usr/local/libexec/wtfbsd-installer/installer-apply
+                                         the root helper: the installer-template's, or a
+                                         stand-in that runs <slug>-install
+usr/local/share/<slug>/live-packages.list   py3-gobject3 gtk+3 (live only)
+```
+
+The installer comes from the installer-template, named in `product.conf`:
+`INSTALLER_DIR` (a local checkout) or `INSTALLER_REF` (a git ref of
+`INSTALLER_URL`, default the public installer-template); the build runs its
+`install-into-stage.sh <stage> --conf <conf>` with `OS=openbsd` and the name
+and slug of the product. Without either, the stand-in text installer is
+used. The two together are refused.
+
+xenodm(1) has no automatic login, so the live image does what a display
+manager does: `live-x` runs the X server as root on the console
+(`xinit ... -- X :0 vt05 -nolisten tcp -auth <cookie>`) and the session as
+`live`. The live user has no password and is not in `wheel`. The
+installer's front ends (graphical and text) run as `live`, never as root:
+a GTK program run as root on the user's display loads code the user
+controls. The one root rule is the installer's GTK-free helper,
+`installer-apply`, with no environment of the user (no `keepenv`, no
+`setenv`). The stand-in helper of the live set runs `<slug>-install` only
+after checking that the files it names (`-H`, `-k`) belong to the account
+that called doas(1). The live image also gives
+every Ethernet adapter DHCP/SLAAC and opens a login on `tty00` (115200).
+
+The console stays on the display: the live image has no `boot.conf` and
+no `set tty com0`. Under bhyve this matters: with a serial console the
+PS/2 keyboard of the display never works (see below).
+
+### The installed system has none of it
+
+`<slug>-install` installs the signed sets and the site set and never
+copies anything of the live set: the installed system has no live user, no
+automatic login, no installer and no live session; `xenodm(1)` shows its
+greeter. The suite checks this on the staged site set and on the root an
+install writes.
+
+### The live verb of the media helper
+
+```
+tar -c -F ustar -f live-inputs.tar -C <dir> site.tgz live.tgz
+doas /usr/local/libexec/wtfbsd-media live 8.0 amd64 < live-inputs.tar > live.img
+```
+
+The live verb uses the same root-owned stock image, the same stdin rules
+(two plain ustar members, now `site.tgz` and `live.tgz`, `live.tgz` capped
+at 64 MB) and writes the image to stdout. It works in
+`mktemp -d /usr/local/share/wtfbsd-media/work/wtfbsd-live.XXXXXX`: the
+image does not fit a small `/tmp`, and `/var/tmp` is a link to `/tmp` on
+OpenBSD. The helper makes `work` root-owned with the mode 0700 and refuses
+it otherwise; the root image is mounted `async` while the sets unpack. The image is `LIVE_MB` (7168) MB, so it fits a stick sold as 8 GB (8,000,000,000 bytes).
+
+Why the helper is wider, and what keeps it narrow:
+
+- It runs commands inside the new root (`pkg_add`, `useradd`, `ldconfig`,
+  `MAKEDEV`), so **nothing of the job is in the new root while they run**:
+  the root holds only the signed sets of the stock image and the packages
+  `pkg_add(1)` verified. The two sets of the job are unpacked last, and no
+  command of the new root runs after that. `install.site` never runs.
+- Every member of both sets is read from its tar header before anything
+  is unpacked: a regular file (type `0`), a relative path of the
+  characters `A-Z a-z 0-9 . _ @ + - /`, no `.` or `..` component, no link
+  name. Before each set is unpacked, no member and no directory above it
+  may be a symbolic link in the new root.
+- The package lists are data: every entry must be a package name.
+- Packages come from `https://cdn.openbsd.org/pub/OpenBSD`, or from a
+  local mirror the operator names in `/usr/local/share/wtfbsd-media/installurl`
+  (root-owned, `0444`, one `http(s)://` URL; the packages are under
+  `<url>/<release>/packages/<arch>/`). `pkg_add(1)` checks every package's
+  signature either way.
+
+What the image holds: the eight sets of the release unpacked (with
+`var/sysmerge/etc.tgz` and `xetc.tgz`, as `install.sub` does), `bsd.mp` as
+`/bsd`, an fstab by DUID, the packages of the site set (and their files
+in the package cache `/usr/local/share/<slug>/packages`), the live
+packages, the live user (the first free uid from 1100), and the sets
+again under `/usr/local/share/<slug>/sets/<release>/<arch>/` with the
+signed `SHA256.sig` and the site set, to install from.
+
+The **Media** stage builds `live.img` for the desktop after the install
+CD, compresses it and archives `live.img.gz` from the media node.
+
+### The install command
+
+```
+<slug>-install -d DISK -u USER [-k PUBKEYFILE] -H HASHFILE [-n HOSTNAME]
+               [-z TIMEZONE] [-K KEYMAP] [-c FULLNAME] [-P]
+               [-N IF:ADDR/MASK:GW | -N IF:dhcp ...] -y [--progress]
+```
+
+The graphical installer calls it as root. It does what `install.sub` does,
+from the files of the live image, without a network: `fdisk -gy -b 532480`,
+the automatic `disklabel -A` layout, `newfs`, the sets (and `etc.tgz`), the
+kernels, the site set, the packages from the cache with `pkg_add`, the
+account (a member of `wheel`; the bcrypt hash `$2b$` of `HASHFILE` goes into
+the password file of the new root from the file, never through an argument), the key, the
+host name, the time zone, `-K` as the wscons encoding and the X layout, the
+network (`hostname.if(5)`, `mygate(5)`; DHCP on every Ethernet adapter
+without `-N`), `-P` as a `doas.conf` nopass rule, the paths of the
+installer's `MANIFEST` removed, `fw_update` at first boot, and
+`installboot -c`. It refuses the disk of the running system (by name or by
+DUID), a disk with a mounted file system, a path instead of a bare disk
+name, and runs only with `-y`. With `--progress` stdout carries only
+`PROGRESS <n> <message>` and `ERROR <message>` lines.
+
+The options of the installer's other pages are the ones of the contract
+of the installer-template:
+
+```
+<slug>-install -p PLANFILE -u USER -H HASHFILE [-c FULLNAME] [-P] [-A]
+               [-k PUBKEYFILE] [-n HOSTNAME] [-z TIMEZONE] [-Z utc|local]
+               [-K KEYMAP] [-L LOCALE] [-r locked|ROOTHASHFILE]
+               [-E PASSPHRASEFILE] [-N IF:dhcp|IF:ADDR/MASK:GW]...
+               [-6 IF:slaac|IF:ADDR6/PREFIXLEN:GW6]... [-D DNS]...
+               [-W WIFIFILE] [-U] [-l ACCEPTFILE] -y --progress
+```
+
+| option | what the installed system gets |
+|--------|--------------------------------|
+| `-p PLANFILE` | the disk plan of the installer (version 1, 0600 JSON) in place of `-d`. Erase and install: `single`, or `raid1` = softraid(4) RAID 1 over the disks; `encryption.enabled` = softraid CRYPTO (RAID 1C with `raid1`) with the passphrase of `-E` (0600, 8-1024 bytes), read by `bioctl -p`, never an argument; `swap_mb` (0: none; OpenBSD encrypts swap itself); `wipe` `secure` overwrites the disk first; `usage` `separate` and `data[]`: single data disks with one FFS each on their mount point. Every system disk gets the EFI partition and the boot loader. RAID 5 is refused (OpenBSD cannot boot from it); install alongside and manual partitioning are not offered on OpenBSD yet |
+| `-L LOCALE` | `LANG` of the account (login profile and X session) |
+| `-Z utc\|local` | the hardware clock; local time is `kern.utc_offset` |
+| `-r locked\|FILE` | root locked (the default), or a bcrypt hash for root (0600) |
+| `-A` | the account's X session at boot (`rc.d/<slug>_autologin` of the site set) instead of the greeter |
+| `-N`, `-6` | IPv4 (`dhcp` or a static address) and IPv6 (`slaac` or a static address) per adapter; one adapter may take both |
+| `-D DNS` | the name servers (IPv4 and IPv6) |
+| `-W FILE` | a Wi-Fi network (0600 JSON: `if`, `ssid`, `security` `wpa2`/`wpa3`/`open`, `psk`): `join ... wpakey ...` in `hostname.if(5)`, open without a key |
+| `-U` | `syspatch` and `pkg_add -u` at the first boot |
+| `-l ACCEPTFILE` | the accepted licences (see below) |
+
+The firmware of every driver is on the live image
+(`/usr/local/share/<slug>/firmware`, downloaded and verified by
+`fw_update -F` when the image is built): the live system uses it, and the
+install command gives the new system what this machine needs with
+`fw_update -p`, so a Wi-Fi card works without a network. The
+hardware window of the installer is described below.
+
+### Branding and the identity line
+
+The greeter of `xenodm(1)` shows the product, never OpenBSD's defaults:
+`/usr/local/libexec/<slug>/brand-xenodm` (run by the install command, by
+`install.site` and, on the live image, by `rc.d/<slug>_live`) appends the
+files of `/usr/local/share/<slug>/xenodm/` to the config of xenodm once,
+so the later lines win: the logo (`logo.xpm`, no Puffy), the name as the
+greeting (not the host name), the colours of the login box, a plain
+background instead of the weave, and the identity line in the lower left
+corner (removed when a session starts). `build.sh` lightens the
+`BRAND_COLOR` towards white until the title has a contrast of at least
+4.5:1 against the login box (#1e2440); the suite checks the ratio.
+
+`build.sh` writes `/usr/local/share/<slug>/identity` (PRODUCT, VERSION,
+BASE, VARIANT, ARCH, BUILD) and the line shown lower left on the greeter
+and the wallpaper, e.g. `ExampleBSD 2026.11 · OpenBSD 8.0 · Default ·
+amd64` (test builds, `WTFBSD_TEST_BUILD=yes`, add `· build <day>`).
+VERSION is `PRODUCT_VERSION` of product.conf, or the year.month of the
+build; BASE is the base system in the image: `ci/media.sh live` reads the
+version string of the staged kernel (`OpenBSD 8.0 (GENERIC.MP) ...`) and
+fails the build when it is missing, names another release than the one
+asked for, or disagrees with BASE of the site set; VARIANT
+is the label of `ARTWORK_VARIANT` (`default` → Default); BUILD is empty on
+releases (the format of the artwork template's `lib-identity.sh`). The
+wallpaper (`backgrounds/wallpaper.png` from the pack, or the
+`wallpaper.svg` this template ships) is stamped with the line, and every session
+sets it on each connected output (`desktop-defaults`).
+
+The artwork comes from the artwork template, pinned in `build.sh`
+(`ARTWORK_PIN`, commit 353ef29): its pre-rendered pack for the variant
+(release `pack-<commit12>`, `<name>-<commit12>-<variant>.tar.xz`) is
+downloaded and checked against the sha256 pinned beside it, so the build
+host needs only ImageMagick (the pack's `identity-stamp.sh` stamps the
+identity line on the greeter background and the wallpaper). Other sources:
+`ARTWORK_PACK` + `ARTWORK_PACK_SHA256` (a pack file or https URL),
+`ARTWORK_DIR` or another `ARTWORK_REF` (rendered with the template's
+`scripts/pack.sh`), or `ARTWORK_REF=none` (the branding this template
+ships). `branding/spots.tsv` is read by column name (`spot`, `openbsd`,
+`rendered`; a missing column fails the build). The spots installed here:
+xenodm logo (every depth), login box and screen setup (they replace
+OpenBSD's files, kept as `*.openbsd`; the greeter starts no `xconsole`,
+and a session start removes one), wallpapers, the distributor, menu and
+installer icons, the identity, the login banner of getty (`im=` of the
+default entry of `/etc/gettytab`, by `brand-getty`; OpenBSD has no
+`/etc/issue`) and the Xfce theme (panel, settings, an xfwm4 theme of the
+Default theme's images in the pack's colours, GTK colours; given to the
+first session of an account by `desktop-defaults`, because the xfce
+packages own the files under `/etc/xdg`). The motd is the product's own
+(`MOTD`); the installer spots belong to installer-template. A spot
+OpenBSD supports that is in neither list fails the build.
+
+The installer-template is pinned the same way (`INSTALLER_PIN`, commit
+fcf5a7f); `INSTALLER_DIR` or another `INSTALLER_REF` overrides it and
+`INSTALLER_REF=none` gives the stand-in text installer.
+
+The
+hardware window of the installer reads `/usr/local/libexec/<slug>/hwreport`:
+one JSON object per device (class, device, driver, description, whether
+its firmware is installed), from `dmesg.boot` and the firmware patterns of
+`fw_update(8)`.
+
+Licensed software: the live image ships
+`/usr/local/share/<slug>/licensed-software.json`, the catalogue of the
+installer's "Additional software" page. On OpenBSD it is **empty**: the
+base system, the packages and the firmware of `fw_update(8)` are
+redistributed by the OpenBSD project without a licence that needs
+acceptance, so nothing moves out of the default install. The firmware
+stays installed by default; its licence texts are the notices in
+`/etc/firmware`. `-l ACCEPTFILE` (0600 JSON) is still accepted: every id
+must be in the catalogue, and the file is kept as
+`/var/db/<slug>/licenses-accepted.json`.
+
+The account is written at install time instead of by a first-boot
+script: the command runs as root on the live system, so it can write the
+new root directly, and exit 0 then means the account is in place.
+
+### The keyboard of the display under bhyve
+
+A bhyve guest's display keyboard is the PS/2 keyboard of `atkbdc`. With a
+serial console (`set tty com0`) OpenBSD's `pckbd` is not the console
+keyboard, and `pckbd_enable()` writes `KBC_KBDENABLE` (0xae) to the
+command port and then `KBC_ENABLE` (0xf4) to the data port. bhyve's
+`atkbdc` marks every command-port write as "a controller command byte
+follows" and swallows the next data-port byte, so 0xf4 never reaches the
+keyboard: `pckbd_enable: command error`, the keyboard stays disabled and
+no key ever arrives. With the display as the console, `pckbd` attaches as
+the console keyboard, sends 0xf4 after a data-port read, and the keyboard
+works. The fix belongs in bhyve (`usr.sbin/bhyve/amd64/atkbdc.c`: route a
+data-port write to the controller only after a command that takes a data
+byte); the live image works around it by keeping the console on the
+display.
+
+### The pointer under bhyve
+
+bhyve's framebuffer comes with a USB tablet on its xHCI controller, and
+OpenBSD refuses it: `uhub0: device problem, disabling port 1`. With
+`XHCI_DEBUG` and `USB_DEBUG` the cause is in the first eight bytes of the
+device descriptor:
+
+```
+usbd_new_device: adding unit addr=2, rev=300, class=0, subclass=0,
+    protocol=0, maxpacket=9, len=18, speed=3
+```
+
+The tablet (`usr.sbin/bhyve/usb_mouse.c`) describes itself as a USB 3
+device (`bcdUSB` 3.0, `bMaxPacketSize0` = 9, the SuperSpeed exponent for
+512, a BOS and SuperSpeed endpoint companions) but tells the xHCI
+emulation it runs at high speed (`ue_usbspeed = USB_SPEED_HIGH`). At high
+speed `bMaxPacketSize0` must be 8, 16, 32 or 64; `usbd_new_device()` of
+OpenBSD checks that and fails, other systems accept it. The fix belongs in
+bhyve (`ue_usbspeed = USB_SPEED_SUPER`, matching the descriptors), or the
+VM can do without the tablet: bhyve then sends the pointer of the display
+to the PS/2 mouse, which OpenBSD drives (`pms0`, `wsmouse0`). Until then
+the live desktop and the installer are driven with the keyboard under
+bhyve; real machines are not affected.
 
 ## CI
 

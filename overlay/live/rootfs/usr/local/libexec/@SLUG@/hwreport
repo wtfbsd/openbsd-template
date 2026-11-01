@@ -1,0 +1,56 @@
+#!/bin/sh
+#
+# hwreport — the hardware of this machine for the "Hardware and drivers"
+# window of the installer: one JSON object per device, on stdout.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+#   {"class": "wifi", "device": "iwm0", "driver": "iwm",
+#    "description": "Intel Wireless-AC 9260", "firmware": "present"}
+#
+# class     gpu, wifi, ethernet, audio, input, storage or usb
+# firmware  "present", "missing" (the driver needs firmware that is not
+#           installed: fw_update(8) installs it), or "none" (not needed)
+#
+# It reads the kernel messages of the boot (/var/run/dmesg.boot, as
+# fw_update(8) does) and the firmware patterns of fw_update(8); it changes
+# nothing and needs no root.
+
+DMESG=${HWREPORT_DMESG:-/var/run/dmesg.boot}
+PATTERNS=${HWREPORT_PATTERNS:-/usr/share/misc/firmware_patterns}
+FWDIR=${HWREPORT_FWDIR:-/etc/firmware}
+[ -r "$DMESG" ] || DMESG=/dev/null
+
+# the drivers that need firmware: the first word of each pattern line
+need=$( [ -r "$PATTERNS" ] && awk '!/^#/ && NF { print $1 }' "$PATTERNS" | sort -u | tr '\n' ' ')
+
+# the last boot only: the messages after the last "OpenBSD x.y" line
+awk '/^OpenBSD [0-9]/ { n = NR } { l[NR] = $0 } END { for (i = n; i <= NR; i++) print l[i] }' "$DMESG" \
+	| need=" $need " fwdir="$FWDIR" awk 'BEGIN { need = ENVIRON["need"]; fwdir = ENVIRON["fwdir"] } 
+	function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+	function cls(d) {
+		if (d ~ /^(inteldrm|amdgpu|radeondrm|nouveau|vga|efifb|simplefb|wsfb)$/) return "gpu"
+		if (d ~ /^(iwm|iwn|iwx|iwi|ipw|wpi|athn|ath|athqwx|qwx|qwz|rtwn|urtwn|run|otus|uath|upgt|rsu|zyd|bwfm|bwi|malo|pgt|ral|rum|ural|mtw|ic)$/) return "wifi"
+		if (d ~ /^(em|ix|ixl|igc|ice|bge|bnx|bnxt|re|rge|sk|msk|age|alc|ale|jme|nfe|vge|vr|xl|fxp|dc|vio|vmx|mcx|aq|axe|axen|ure|cdce|urndis|cue|kue|smsc|mos|udav)$/) return "ethernet"
+		if (d ~ /^(azalia|auich|auixp|autri|auvia|eap|emu|envy|cmpci|clcs|yds|uaudio|sbdsp)$/) return "audio"
+		if (d ~ /^(pckbd|pms|ukbd|ums|uts|ihidev|imt|ims|hidkbd|hidms|uhidev|wskbd|wsmouse)$/) return "input"
+		if (d ~ /^(ahci|nvme|sdmmc|mpi|mfi|mfii|mpii|ami|sd|wd|vioblk|vioscsi|pciide|umass)$/) return "storage"
+		return ""
+	}
+	/^[a-z]+[0-9]+ at [a-z]+[0-9]*/ {
+		dev = $1
+		drv = dev; sub(/[0-9]+$/, "", drv)
+		c = cls(drv)
+		if (c == "" || seen[dev]++) next
+		desc = ""
+		if (match($0, /"[^"]*"/)) desc = substr($0, RSTART + 1, RLENGTH - 2)
+		fw = "none"
+		if (index(need, " " drv " ")) {
+			fw = "missing"
+			cmd = "ls " fwdir " 2>/dev/null"
+			while ((cmd | getline f) > 0) if (index(f, drv) == 1) fw = "present"
+			close(cmd)
+		}
+		printf "{\"class\": \"%s\", \"device\": \"%s\", \"driver\": \"%s\", \"description\": \"%s\", \"firmware\": \"%s\"}\n", \
+			c, esc(dev), esc(drv), esc(desc), fw
+	}'

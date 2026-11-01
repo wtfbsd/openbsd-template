@@ -1,0 +1,9 @@
+# @SLUG@ branding (brand-xenodm): the identity line of the greeter goes
+# when a session starts, and so does an xconsole of OpenBSD's Xsetup_0 (it
+# would stay into the session). xenodm starts no session when this script
+# fails: nothing to remove is not a failure.
+if [ -f /var/run/@SLUG@-identity.pid ]; then
+	kill "$(cat /var/run/@SLUG@-identity.pid)" 2> /dev/null
+	rm -f /var/run/@SLUG@-identity.pid
+fi
+pkill -x xconsole 2> /dev/null || :

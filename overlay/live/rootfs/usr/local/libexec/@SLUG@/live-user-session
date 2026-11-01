@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# live-user-session — the session of the live user: the Xfce desktop, the
+# "Install @DISTRO_NAME@" icon, and the installer opened first.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Live image only. The installer starts full screen through the autostart
+# of Xfce; "Try the live desktop" closes it into this session, and the icon
+# on the desktop (or the entry of the menu) opens it again.
+#
+# The graphical installer (installer-template) brings its own autostart
+# entry, which also puts the icon on the desktop; the stand-in text
+# installer uses the entries of the live set.
+
+mkdir -p "$HOME/Desktop" "$HOME/.config/autostart"
+G=/usr/local/share/wtfbsd-installer/autostart/wtfbsd-installer.desktop
+S=@SLUG@
+L=/usr/local/share/$S/live
+if [ -f "$G" ]; then
+	cp "$G" "$HOME/.config/autostart/wtfbsd-installer.desktop"
+else
+	cp "$L/$S-install.desktop" "$HOME/Desktop/$S-install.desktop"
+	chmod 0755 "$HOME/Desktop/$S-install.desktop"
+	cp "$L/$S-installer-autostart.desktop" "$HOME/.config/autostart/$S-installer.desktop"
+fi
+[ ! -x /usr/local/libexec/$S/desktop-defaults ] \
+	|| /usr/local/libexec/$S/desktop-defaults
+exec /usr/local/bin/startxfce4

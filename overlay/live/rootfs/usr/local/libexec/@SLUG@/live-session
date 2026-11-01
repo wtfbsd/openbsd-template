@@ -1,0 +1,12 @@
+#!/bin/sh
+#
+# live-session — the X client xinit(1) starts on the live image: it lets
+# the live user use the display, then runs
+# the session of the live user.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/X11R6/bin:/usr/local/sbin:/usr/local/bin
+export PATH
+xhost +si:localuser:live > /dev/null
+exec su -l live -c 'env DISPLAY=:0 /usr/local/libexec/@SLUG@/live-user-session'

@@ -1,0 +1,9 @@
+#!/bin/sh
+#
+# open-installer — open the installer of the live image.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The installer runs as the live user; only its root helper runs as root
+# (doas.conf(5) of the live set).
+exec /usr/local/bin/wtfbsd-installer "$@"

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- @DISTRO_NAME@ wallpaper with the identity line in the lower left
+     corner, stamped by build.sh (/usr/local/share/@SLUG@/identity-line).
+     The artwork template replaces it when ARTWORK_DIR or ARTWORK_REF is set. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e2440"/>
+      <stop offset="1" stop-color="#14182b"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1920" height="1080" fill="url(#bg)"/>
+  <circle cx="1560" cy="180" r="420" fill="#2f6fde" opacity="0.22"/>
+  <circle cx="240" cy="960" r="340" fill="#21b8a6" opacity="0.14"/>
+  <g transform="translate(680,260) scale(1.25)">
+    <rect x="0" y="0" width="448" height="448" rx="104" ry="104" fill="#f4f6fb" fill-opacity="0.06"/>
+    <rect x="80" y="104" width="288" height="48" rx="24" ry="24" fill="#14182b" fill-opacity="0.45"/>
+    <rect x="80" y="200" width="208" height="48" rx="24" ry="24" fill="#21b8a6" fill-opacity="0.35"/>
+    <rect x="80" y="296" width="288" height="48" rx="24" ry="24" fill="#14182b" fill-opacity="0.45"/>
+  </g>
+  <text id="identity" x="24" y="1044" font-family="DejaVu Sans, sans-serif" font-size="20" fill="#a9b1cc">@IDENTITY_XML@</text>
+</svg>

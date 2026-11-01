@@ -1,0 +1,12 @@
+# @SLUG@ branding (brand-xenodm): the background of the greeter and the
+# identity line in the lower left corner
+[ -f /usr/local/share/@SLUG@/xenodm/Xresources.pack ] || xsetroot -solid '#14182b'
+# (the core fonts of xmessage are not UTF-8: the line with " | ")
+/usr/X11R6/bin/xmessage -name @SLUG@-identity -buttons '' -borderwidth 0 \
+	-xrm '*message.scrollVertical: never' -xrm '*message.scrollHorizontal: never' \
+	-xrm '*message.borderWidth: 0' -xrm '*form.borderWidth: 0' \
+	-geometry +16-12 -bg '#14182b' -fg '#a9b1cc' \
+	"$(cat /usr/local/share/@SLUG@/identity-line.ascii 2> /dev/null)" &
+# Xt rewrites the arguments of xmessage (ps shows no -name), so the
+# session start finds it by its pid
+echo $! > /var/run/@SLUG@-identity.pid
