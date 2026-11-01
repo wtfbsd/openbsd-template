@@ -1,0 +1,9 @@
+# class-checks allow-list (agents/tools/class-checks): CLASS PATH:LINE REASON
+shellcheck ci/media.sh:448 rc is assigned first in the same trap string (rc=$?)
+shellcheck ci/providers/bhyve.sh:161 the provider runs on a FreeBSD host, whose sh and test(1) have -O
+shellcheck ci/providers/bhyve.sh:204 the provider runs on a FreeBSD host, whose sh and test(1) have -O
+shellcheck tests/run-tests.sh:860 deliberate glob match of a literal path against the pattern in _p
+shellcheck tests/run-tests.sh:861 deliberate glob match of a literal path against the pattern in _p
+shellcheck tests/run-tests.sh:862 deliberate glob match of a literal path against the pattern in _p
+shellcheck tests/run-tests.sh:863 deliberate glob match of a literal path against the pattern in _p
+tmp-predictable tests/run-tests.sh:1389 a grep pattern that checks the old default state path is gone, nothing is written there

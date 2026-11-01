@@ -66,7 +66,7 @@ build() {
 # that holds the pattern. The block is extracted, not read: the stage is
 # then run the way the pipeline runs it.
 jenkins_sh_with() {
-	sed "s/'''/@QQ@/g" "$JF" | awk -v pat="$1" '
+	sed "s/'''/@QQ@/g" "$JF" | pat="$1" awk 'BEGIN { pat = ENVIRON["pat"] }
 		/sh @QQ@/ { c++; keep = 0; buf = ""; next }
 		/^[[:space:]]*@QQ@[[:space:]]*$/ {
 			if (buf ~ pat) { printf "%s", buf; exit }
@@ -256,7 +256,7 @@ else
 	ok 'every member of the site set is owned by root'
 fi
 _member_mode() { # _member_mode <listing> <name> — the mode of a member of the archive
-	awk -v n="$2" '
+	n="$2" awk 'BEGIN { n = ENVIRON["n"] }
 		function bits(t,   v, i, c) {
 			v = 0
 			for (i = 1; i <= 3; i++) {
@@ -1311,6 +1311,87 @@ else
 	no 'the bhyve provider reads the serial console in raw mode'
 fi
 
+# (k9) the provider runs as root and keeps the state of the VMs in a
+#      directory. A fixed name in a shared temporary directory can be
+#      made first by another user, or be a symbolic link that user
+#      planted, and so can any directory above it: root would then write
+#      and remove where that user says. The default is a directory of
+#      root; a state directory that is a symbolic link, sits below a link
+#      root does not own or below a directory others can write to, or is
+#      writable by others itself, is refused; a new one is made 0700.
+#      Every case runs the provider itself.
+_sd="$work/statedir"
+rm -rf "$_sd"
+mkdir -p "$_sd/bin" "$_sd/target/victim" "$_sd/elsewhere/state/victim" "$_sd/openparent/state/victim" \
+	"$_sd/openself/victim"
+: > "$_sd/target/victim/keep"
+: > "$_sd/elsewhere/state/victim/keep"
+: > "$_sd/openparent/state/victim/keep"
+: > "$_sd/openself/victim/keep"
+: > "$_sd/image.img"
+: > "$_sd/firmware.fd"
+chmod 700 "$_sd/elsewhere/state" "$_sd/openparent/state"
+chmod 777 "$_sd/openparent" "$_sd/openself"
+printf '#!/bin/sh\nif [ "$1" = -u ]; then echo 0; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$_sd/bin/id"
+for _sdt in ifconfig sleep bhyve bhyvectl kldstat kldload; do
+	printf '#!/bin/sh\nexit 0\n' > "$_sd/bin/$_sdt"
+done
+chmod 755 "$_sd/bin/"*
+ln -s "$_sd/target" "$_sd/link"
+ln -s "$_sd/elsewhere" "$_sd/plink"
+_sdrun() { # _sdrun <log> <state dir> <command> <args...> — run the provider once
+	_sdlog=$1 _sddir=$2
+	shift 2
+	WTFBSD_VM_DEVICE_DIR="$_sd/nodev" WTFBSD_VM_FIRMWARE="$_sd/firmware.fd" WTFBSD_VM_NMD_A="$_sd/nonmdm/A" WTFBSD_VM_NMD_B="$_sd/nonmdm/B" PATH="$_sd/bin:$PATH" WTFBSD_VM_STATE_DIR="$_sddir" WTFBSD_VM_CONSOLE_DIR="$_sddir" \
+		sh "$BHYVE" "$@" > "$_sdlog" 2>&1
+	_sdrc=$?
+}
+_sdrun "$_sd/link.log" "$_sd/link" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/target/victim/keep" ] && grep -q 'it is a symbolic link' "$_sd/link.log"; then
+	ok "(k9) the provider refuses a state directory that is a symbolic link, and removes nothing through it"
+else
+	no "(k9) the provider refuses a state directory that is a symbolic link, and removes nothing through it (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/link.log"
+fi
+_sdrun "$_sd/plink.log" "$_sd/plink/state" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/elsewhere/state/victim/keep" ] &&
+	grep -q 'plink is a symbolic link that root does not own' "$_sd/plink.log"; then
+	ok "(k9) the provider refuses a state directory below a symbolic link root does not own, and removes nothing through it"
+else
+	no "(k9) the provider refuses a state directory below a symbolic link root does not own, and removes nothing through it (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/plink.log"
+fi
+_sdrun "$_sd/openparent.log" "$_sd/openparent/state" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/openparent/state/victim/keep" ] &&
+	grep -q 'others can write to .*/openparent$' "$_sd/openparent.log"; then
+	ok "(k9) the provider refuses a state directory below a directory others can write to"
+else
+	no "(k9) the provider refuses a state directory below a directory others can write to (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/openparent.log"
+fi
+_sdrun "$_sd/openself.log" "$_sd/openself" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/openself/victim/keep" ] && grep -q 'others can write to it' "$_sd/openself.log"; then
+	ok "(k9) the provider refuses a state directory others can write to"
+else
+	no "(k9) the provider refuses a state directory others can write to (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/openself.log"
+fi
+# create makes a new state directory 0700 (the run stops later, at the
+# serial device the test host does not have)
+_sdrun "$_sd/new.log" "$_sd/new/state" create probe "$_sd/image.img"
+_sdmode=$(ls -ld "$_sd/new/state" 2> /dev/null | cut -c1-10)
+if [ "$_sdmode" = 'drwx------' ]; then
+	ok "(k9) a new state directory of the provider is made 0700"
+else
+	no "(k9) a new state directory of the provider is made 0700 (got: $_sdmode)"
+	sed 's/^/      | /' "$_sd/new.log"
+fi
+if grep -q '/var/db/wtfbsd-vm' "$BHYVE" && ! grep -q '/var/tmp/wtfbsd-vm' "$BHYVE"; then
+	ok "(k9) the default state directory of the provider is a directory of root, not in /var/tmp"
+else
+	no "(k9) the default state directory of the provider is a directory of root, not in /var/tmp"
+fi
+
 # the command line of the hypervisor: the firmware is loaded as a bootrom,
 # the host bridge and the lpc have their slots
 rm -rf "$work/fakeprov" "$work/fakebin2" "$work/fakedev"
@@ -1618,11 +1699,13 @@ grep -qi 'already gone' "$work/destroy.log" 2> /dev/null \
 	|| no 'the destroy of a VM that is not there says it was already gone'
 
 # a destroy without bhyvectl fails and does not claim a destroyed VM
-rm -rf "$work/vmstate2" "$work/vmdev2" "$work/bin"
+rm -rf "$work/vmstate2" "$work/vmdev2" "${work:?}/bin"
 mkdir -p "$work/vmstate2/gonevm" "$work/vmdev2" "$work/bin"
 : > "$work/vmdev2/gonevm"
 : > "$work/vmstate2/gonevm/bhyve.pid"
-for _t in basename id kill rm cat; do
+# find: the provider reads the owner and the mode of the state directories
+# with it (and refuses them when it cannot)
+for _t in basename id kill rm cat find; do
 	_p=$(command -v "$_t" 2> /dev/null) || continue
 	[ -x "$_p" ] || continue
 	ln -sf "$_p" "$work/bin/$_t"
@@ -2429,7 +2512,7 @@ case ${1:-} in
 -l)
 	_i=0
 	while [ "$_i" -le 3 ]; do
-		_p=$(awk -v u="vnd$_i" '$1 == u { print substr($0, index($0, " ") + 1); exit }' "$_state" 2> /dev/null)
+		_p=$(u="vnd$_i" awk 'BEGIN { u = ENVIRON["u"] } $1 == u { print substr($0, index($0, " ") + 1); exit }' "$_state" 2> /dev/null)
 		if [ -n "$_p" ]; then
 			printf 'vnd%s: covering %s on sd0d, inode 3\n' "$_i" "$_p"
 		else
@@ -2441,7 +2524,7 @@ case ${1:-} in
 	;;
 -u)
 	if [ -f "$_state" ]; then
-		awk -v u="${2:-}" '$1 != u' "$_state" > "$_state.tmp" 2> /dev/null || : > "$_state.tmp"
+		u="${2:-}" awk 'BEGIN { u = ENVIRON["u"] } $1 != u' "$_state" > "$_state.tmp" 2> /dev/null || : > "$_state.tmp"
 		mv "$_state.tmp" "$_state" 2> /dev/null || true
 	fi
 	exit 0
@@ -4333,7 +4416,7 @@ done
 
 # the opencode configuration is valid JSON
 if command -v python3 > /dev/null 2>&1; then
-	if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$repo/opencode.json" > /dev/null 2>&1; then
+	if python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$repo/opencode.json" > /dev/null 2>&1; then
 		ok 'opencode.json is valid JSON'
 	else
 		no 'opencode.json is valid JSON'

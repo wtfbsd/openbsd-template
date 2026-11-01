@@ -188,7 +188,7 @@ vnd_attach() {
 #   vnd1: not in use
 vnd_unit_for() {
 	_list=$(vnconfig -l 2> /dev/null) || return 1
-	printf '%s\n' "$_list" | awk -v img="$1" '
+	printf '%s\n' "$_list" | img="$1" awk 'BEGIN { img = ENVIRON["img"] }
 		{
 			unit = $1
 			sub(/:$/, "", unit)
@@ -357,7 +357,7 @@ SITENAME=site$NN.tgz
 root_owned "$STOCK_DIR" 'the directory of the stock images' dir
 root_owned "$STOCK_ISO" 'the stock image'
 root_owned "$STOCK_SUMS" 'the SHA256 file of the release'
-_want=$(awk -v n="($ISONAME)" '
+_want=$(n="($ISONAME)" awk 'BEGIN { n = ENVIRON["n"] }
 	$1 == "SHA256" && $2 == n && $3 == "=" && NF == 4 { print $4; c++ }
 	END { if (c != 1) exit 1 }' "$STOCK_SUMS") \
 	|| die "the SHA256 file names $ISONAME not exactly once: $STOCK_SUMS"

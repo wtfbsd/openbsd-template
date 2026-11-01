@@ -565,7 +565,7 @@ conf_for_profile() { # conf_for_profile <template> <profile> <mode> — the answ
 	# line. The answers of a broken template would be the answers of
 	# half a template, and the installer asks the questions that are
 	# missing.
-	awk -v prof="$2" -v mode="$3" -v tmpl="$1" '
+	prof="$2" mode="$3" tmpl="$1" awk 'BEGIN { prof = ENVIRON["prof"]; mode = ENVIRON["mode"]; tmpl = ENVIRON["tmpl"] }
 		function fail(msg, line) {
 			failed = 1
 			printf "%s: line %d: %s\n", tmpl, line, msg | "cat >&2"
