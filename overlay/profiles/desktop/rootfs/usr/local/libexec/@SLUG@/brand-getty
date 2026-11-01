@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# brand-getty ROOT — the login banner of getty(8) on the system at ROOT
+# says @DISTRO_NAME@: the im= capability of the "default" entry of
+# /etc/gettytab becomes the one of the artwork template
+# (/usr/local/share/@SLUG@/console/gettytab.im). OpenBSD has no /etc/issue.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Run by the installer (@SLUG@-install), install.site and the live image.
+# The first run keeps the original as gettytab.openbsd; a second run
+# changes nothing.
+
+set -u
+root=${1:-/}
+root=${root%/}
+im=$root/usr/local/share/@SLUG@/console/gettytab.im
+gt=$root/etc/gettytab
+[ -f "$im" ] || exit 0
+[ -f "$gt" ] || { echo "brand-getty: no $gt" >&2; exit 1; }
+new=$(head -n 1 "$im")
+case $new in *:*) echo 'brand-getty: the banner may not hold a colon' >&2; exit 1 ;; esac
+[ -f "$gt.openbsd" ] || cp -p "$gt" "$gt.openbsd" || exit 1
+# the default entry runs from "default:" to its first line that does not
+# end in a backslash; its im= is replaced by position (no regex replacement,
+# the banner holds backslashes)
+# (awk -v would turn the \r\n of the banner into control characters: the
+# banner comes through the environment)
+BRAND_IM=$new awk '
+	BEGIN { new = ENVIRON["BRAND_IM"] }
+	/^default[:|]/ { inent = 1 }
+	inent && !done {
+		i = index($0, ":im=")
+		if (i > 0) {
+			rest = substr($0, i + 4)
+			j = index(rest, ":")
+			if (j > 0) { $0 = substr($0, 1, i + 3) new substr(rest, j); done = 1 }
+		}
+	}
+	{ print }
+	inent && $0 !~ /\\$/ { inent = 0 }
+	END { if (!done) exit 3 }' "$gt" > "$gt.new" || { rm -f "$gt.new"; echo 'brand-getty: no im= in the default entry' >&2; exit 1; }
+cat "$gt.new" > "$gt" && rm -f "$gt.new"

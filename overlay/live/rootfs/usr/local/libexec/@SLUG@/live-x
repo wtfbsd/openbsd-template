@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# live-x — the X server of the live image, logged in as the live user.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Live image only, started by rc.d/@SLUG@_live as root. xenodm(1) has no
+# automatic login, so the live image does what a display manager does: the
+# X server runs as root on the console, and the session (live-session) runs
+# as the live user. On the installed system xenodm(1) shows its greeter.
+#
+# It also gives every Ethernet adapter an address (DHCP and SLAAC), and a
+# login on the first serial port, for machines without a display.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/X11R6/bin:/usr/local/sbin:/usr/local/bin
+export PATH
+
+# the network: the live image does not know the adapters of the machine
+ifconfig 2> /dev/null | awk '/^[a-z]+[0-9]+: flags=/ { sub(/:$/, "", $1); n = $1 } /media: Ethernet/ { print n }' \
+	| while read -r _if; do
+		ifconfig "$_if" inet autoconf 2> /dev/null
+		ifconfig "$_if" inet6 autoconf 2> /dev/null
+	done
+
+# a login on the first serial port (115200 baud), live image only
+if grep -q '^tty00[[:space:]].*[[:space:]]off' /etc/ttys 2> /dev/null; then
+	sed -e '/^tty00[[:space:]]/s|"[^"]*"|"/usr/libexec/getty std.115200"|' \
+		-e '/^tty00[[:space:]]/s|[[:space:]]off| on|' /etc/ttys > /etc/ttys.new \
+		&& cat /etc/ttys.new > /etc/ttys && rm -f /etc/ttys.new && kill -HUP 1
+fi
+
+S=@SLUG@
+AUTH=/var/run/$S-live.xauth
+while :; do
+	rm -f "$AUTH"
+	umask 077
+	: > "$AUTH"
+	xauth -q -f "$AUTH" add :0 . "$(openssl rand -hex 16)"
+	umask 022
+	XAUTHORITY=$AUTH
+	export XAUTHORITY
+	xinit /usr/local/libexec/@SLUG@/live-session -- /usr/X11R6/bin/X :0 vt05 \
+		-nolisten tcp -auth "$AUTH" > "/var/log/$S-live.log" 2>&1
+	# the session ended (the live user logged out): a new one, after a
+	# pause that keeps a broken X server from spinning
+	sleep 3
+done

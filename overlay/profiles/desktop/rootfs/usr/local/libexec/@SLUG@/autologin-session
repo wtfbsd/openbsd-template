@@ -1,0 +1,12 @@
+#!/bin/sh
+#
+# autologin-session — the X client of autologin-x: the account may use the
+# display, then its own X session runs (~/.xsession, as with xenodm(1)).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/X11R6/bin:/usr/local/sbin:/usr/local/bin
+export PATH
+user=$AUTOLOGIN_USER
+xhost "+si:localuser:$user" > /dev/null
+exec su -l "$user" -c 'env DISPLAY=:0 /bin/sh "$HOME/.xsession"'

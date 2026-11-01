@@ -1,0 +1,19 @@
+#!/bin/ksh
+#
+# @SLUG@_autologin — log one account in on the display at boot (rc.d(8)).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Off unless the installer was asked for it: @SLUG@-install --autologin
+# writes, into rc.conf.local, xenodm_flags=NO, @SLUG@_autologin_flags=<user>
+# and adds @SLUG@_autologin to pkg_scripts. xenodm(1) has no automatic
+# login of its own.
+
+daemon="/usr/local/libexec/@SLUG@/autologin-x"
+
+. /etc/rc.d/rc.subr
+
+rc_bg=YES
+rc_reload=NO
+
+rc_cmd "$1"

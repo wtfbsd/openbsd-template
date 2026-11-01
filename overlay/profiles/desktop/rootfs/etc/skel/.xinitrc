@@ -13,4 +13,6 @@
 # /etc/skel is copied into the home directory of every new account, so
 # every operator account of the desktop profile starts in Xfce.
 
+[ ! -x /usr/local/libexec/@SLUG@/desktop-defaults ] \
+	|| /usr/local/libexec/@SLUG@/desktop-defaults
 exec /usr/local/bin/startxfce4

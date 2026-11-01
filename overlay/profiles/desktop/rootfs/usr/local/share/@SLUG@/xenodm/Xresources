@@ -1,0 +1,13 @@
+! @SLUG@ branding — appended to /etc/X11/xenodm/Xresources by
+! /usr/local/libexec/@SLUG@/brand-xenodm; the later lines win over the
+! OpenBSD defaults above them (the Puffy logo, the host name greeting).
+xlogin*greeting: @DISTRO_NAME@
+xlogin*logoFileName: /usr/local/share/@SLUG@/xenodm/logo.xpm
+xlogin*background: #@GREET_BG@
+xlogin*inpColor: #2a3155
+xlogin*hiColor: #2a3155
+xlogin*shdColor: #2a3155
+xlogin*Foreground: #f4f6fb
+! the brand colour, lightened by build.sh to a contrast of 4.5:1 or more
+! against the background of the login box
+xlogin*greetColor: #@GREET_COLOR@

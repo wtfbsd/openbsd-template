@@ -1,0 +1,33 @@
+#!/bin/ksh
+#
+# @SLUG@_live — the live session of the live image (rc.d(8)).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Live image only: the live set puts this script and "pkg_scripts" in
+# rc.conf.local; the installed system never has either (@SLUG@-install
+# copies nothing of the live set).
+#
+# It starts /usr/local/libexec/@SLUG@/live-x in the background: the X server
+# on the display, logged in as the live user, the installer first.
+
+daemon="/usr/local/libexec/@SLUG@/live-x"
+
+. /etc/rc.d/rc.subr
+
+rc_bg=YES
+rc_reload=NO
+
+# the greeter of xenodm(1) on the live image carries the branding of the
+# product too (once; a second run changes nothing)
+rc_pre() {
+	[ ! -x /usr/local/libexec/@SLUG@/brand-xenodm ] \
+		|| /usr/local/libexec/@SLUG@/brand-xenodm / \
+		|| echo '@SLUG@_live: could not brand the greeter of xenodm' >&2
+	[ ! -x /usr/local/libexec/@SLUG@/brand-getty ] \
+		|| /usr/local/libexec/@SLUG@/brand-getty / \
+		|| echo '@SLUG@_live: could not brand the login banner' >&2
+	return 0
+}
+
+rc_cmd "$1"

@@ -66,6 +66,20 @@ a chroot(8) based at that root. An unattended install is driven by
 18. The response file holds the hash of the password of the operator
     account: it is a secret. It is written with the mode **0600**, and
     the CI archives `install.conf.redacted` — never `install.conf`.
+19. The desktop also writes the **live set** (`live80.tgz`, overlay/live):
+    the live session, the installer, `<slug>-install` and the live doas
+    rule. Nothing of it may reach the site set: the installed system has
+    no live user, no automatic login and no installer (the suite checks the
+    site set and the root an install writes). The one doas rule of `live`
+    is `permit nopass live as root cmd
+    /usr/local/libexec/wtfbsd-installer/installer-apply` (no keepenv, no
+    setenv); the installer's front ends never run as root.
+20. The live verb of the media helper (`ci/media.sh live`) runs commands
+    inside the new root only while it holds the signed sets and verified
+    packages: the two sets of the job are checked member by member and
+    unpacked after the last such command; `install.site` never runs on
+    the media node. Keep the console of the live image on the display (no
+    `set tty com0`): bhyve's PS/2 keyboard needs it (README).
 
 ## How to build
 

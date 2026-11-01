@@ -1,0 +1,9 @@
+# packages.list — the packages of the live image only.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The graphical installer is a GTK 3 program in Python (PyGObject). The
+# installed system does not get these packages: they belong to the live
+# set, and @SLUG@-install installs the packages of the site set only.
+py3-gobject3
+gtk+3

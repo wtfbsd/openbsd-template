@@ -1,0 +1,1049 @@
+#!/bin/sh
+#
+# @SLUG@-install — install @DISTRO_NAME@ onto a disk, from the live system.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+#   @SLUG@-install -d DISK -u USER [-k PUBKEYFILE] -H HASHFILE [-n HOSTNAME]
+#                  [-z TIMEZONE] [-K KEYMAP] [-c FULLNAME] [-P]
+#                  [-N IF:ADDR/MASK:GW | -N IF:dhcp ...] -y [--progress]
+#
+#   -d  a bare disk name (sd0, wd0), never a path
+#   -K  the wscons(4) keyboard encoding (us, de, fr, ...); the X server of
+#       the installed system gets the same layout
+#   -c  the full name of the account; -P: the account uses doas(1) without
+#       a password
+#   -N  the network of the installed system, repeatable; without -N every
+#       Ethernet adapter asks for an address (DHCP and SLAAC):
+#       IF:dhcp, IF:ADDR/MASK:GW (IPv4) or IF:ADDR6/PREFIXLEN:GW6 (IPv6); an
+#       empty GW gives the address and no default route
+#   -p PLANFILE  the disk plan of the installer (version 1, JSON, mode 0600)
+#       in place of -d: {"version": 1, "mode": "erase", "disks": [...],
+#       "layout": "single" | "raid1", "filesystem": "ffs",
+#       "encryption": {"enabled": bool, "swap": bool}, "swap_mb": N,
+#       "boot": "uefi" | "bios", "wipe": {"sd1": "quick" | "secure"}, ...}
+#       raid1 is softraid(4) RAID 1 over the disks, encryption is softraid
+#       CRYPTO (RAID 1C with raid1). Install alongside, manual partitions,
+#       data pools and RAID 5 (OpenBSD cannot boot from it) are refused
+#   -E PASSFILE  the passphrase of the encryption (0600); bioctl(8) reads
+#       it from the file, it is never an argument
+#   -L LOCALE   the system locale (LANG of the account; de_DE.UTF-8, ...)
+#   -Z utc|local  the hardware clock keeps UTC (default) or local time
+#   -r locked|FILE  root locked (default), or a bcrypt hash for root (0600)
+#   -A          the account is logged in at boot (no greeter)
+#   -6 IF:slaac | IF:ADDR6/PREFIXLEN:GW6  IPv6 per adapter (repeatable)
+#   -D DNS      a name server, IPv4 or IPv6 (repeatable)
+#   -W FILE     a Wi-Fi network, 0600 JSON {"if", "ssid", "security":
+#               "wpa2" | "wpa3" | "open", "psk"}; the firmware comes from
+#               the live image (fw_update -p)
+#   -U          syspatch(8) and pkg_add -u at the first boot
+#   -l ACCEPTFILE        the licences the user accepted (0600 JSON, a list of
+#                        {"id", "license", "sha256", "timestamp"}); every id
+#                        must be in licensed-software.json of the live image.
+#                        Only those items are installed, and the file is kept
+#                        as /var/db/<slug>/licenses-accepted.json. OpenBSD's
+#                        catalogue is empty: nothing it ships needs acceptance
+#
+# Live image only. It does what the installer of OpenBSD does (install.sub),
+# from the files the live image carries, without a network:
+#
+#   1. the GPT of DISK (an EFI system partition and an OpenBSD partition,
+#      fdisk -gy -b 532480) and the automatic disklabel(8) layout, newfs(8)
+#   2. the signed sets of the release, unpacked over the new root, and the
+#      kernels (bsd.mp is /bsd, bsd is /bsd.sp)
+#   3. the site set of the product (install.site(5)) over the new root
+#   4. the packages of the site set, with pkg_add(1) from the package cache
+#      of the live image (pkg_add checks their signatures)
+#   5. the account of USER, a member of wheel, with the bcrypt hash of
+#      HASHFILE, the key of PUBKEYFILE, the name of the host, the time
+#      zone and the keyboard layout
+#   6. the boot loader (installboot -c)
+#
+# The installed system is the site set over the signed sets: it has no live
+# user, no automatic login and no installer, because nothing of the live
+# set is ever copied to DISK.
+#
+# The hash is read from HASHFILE (mode 0600, one bcrypt hash: OpenBSD's
+# crypt(3) is bcrypt, "$2b$"); it is never an argument of a process.
+#
+# With --progress, stdout carries only "PROGRESS <0-100> <message>" lines,
+# and "ERROR <message>" before a non-zero exit. The output of the tools goes
+# to stderr. Exit 0 only when the disk is bootable and the account is
+# written.
+
+set -u
+
+PROG=@SLUG@-install
+SLUG=@SLUG@
+SHARE=/usr/local/share/$SLUG
+SETS='base comp man game xbase xshare xfont xserv'
+# the files of the installer of the live image (install-into-stage.sh)
+MANIFEST=/usr/local/share/wtfbsd-installer/MANIFEST
+# the device nodes of the disks
+DEVDIR=/dev
+# the locales of the system (a locale is LANG=<lang>_<country>.<charset>)
+LOCALEDIR=/usr/share/locale
+
+PROGRESS=0
+progress() { # progress <percent> <message>
+	if [ "$PROGRESS" -eq 1 ]; then
+		printf 'PROGRESS %s %s\n' "$1" "$2"
+	else
+		printf '%s: %s\n' "$PROG" "$2" >&2
+	fi
+}
+fail() { # fail <message> — ERROR line, cleanup, exit 1
+	if [ "$PROGRESS" -eq 1 ]; then
+		printf 'ERROR %s\n' "$1"
+	fi
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	exit 1
+}
+usage() {
+	printf 'usage: %s -d DISK -u USER [-k PUBKEYFILE] -H HASHFILE [-n HOSTNAME]\n' "$PROG" >&2
+	printf '       %*s [-z TIMEZONE] [-K KEYMAP] [-c FULLNAME] [-P]\n' "${#PROG}" '' >&2
+	printf '       %*s [-N IF:ADDR/MASK:GW | -N IF:dhcp ...] -y [--progress]\n' "${#PROG}" '' >&2
+	exit 2
+}
+
+# --progress is the one long option: it is taken out before getopts.
+_n=$#
+while [ "$_n" -gt 0 ]; do
+	_a=$1
+	shift
+	_n=$((_n - 1))
+	case $_a in
+		--progress) PROGRESS=1 ;;
+		--*) printf '%s: unknown option %s\n' "$PROG" "$_a" >&2; exit 2 ;;
+		*) set -- "$@" "$_a" ;;
+	esac
+done
+
+SWAP_MB=''
+LOCALE=''
+RTC=utc
+ROOTHASH=''
+AUTOLOGIN=0
+DNS=''
+NETS6=''
+WIFIFILE=''
+UPDATE=0
+DISK=''
+NUSER=''
+KEYFILE=''
+HASHFILE=''
+NHOST=''
+TZONE=UTC
+KEYMAP=''
+FULLNAME=''
+NOPASS=0
+NETS=''
+PLAN=''
+ACCEPT=''
+EPASS=''
+YES=0
+while getopts 'd:p:u:k:H:n:z:K:c:PN:l:E:L:Z:r:A6:D:W:Uyh' _o; do
+	case $_o in
+		d) DISK=$OPTARG ;;
+		p) PLAN=$OPTARG ;;
+		l) ACCEPT=$OPTARG ;;
+		E) EPASS=$OPTARG ;;
+		L) LOCALE=$OPTARG ;;
+		Z) RTC=$OPTARG ;;
+		r) [ "$OPTARG" = locked ] || ROOTHASH=$OPTARG ;;
+		A) AUTOLOGIN=1 ;;
+		6) NETS6="$NETS6 $OPTARG" ;;
+		D) DNS="$DNS $OPTARG" ;;
+		W) WIFIFILE=$OPTARG ;;
+		U) UPDATE=1 ;;
+		u) NUSER=$OPTARG ;;
+		k) KEYFILE=$OPTARG ;;
+		H) HASHFILE=$OPTARG ;;
+		n) NHOST=$OPTARG ;;
+		z) TZONE=$OPTARG ;;
+		K) KEYMAP=$OPTARG ;;
+		c) FULLNAME=$OPTARG ;;
+		P) NOPASS=1 ;;
+		N) NETS="$NETS $OPTARG" ;;
+		y) YES=1 ;;
+		h) usage ;;
+		*) usage ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ "$#" -eq 0 ] || usage
+
+# --- the answers ----------------------------------------------------------
+
+# secret_file <path> <what> — a regular file, not a link, mode 0600 or 0400
+secret_file() {
+	[ -f "$1" ] && [ ! -L "$1" ] || fail "the $2 is not a regular file: $1"
+	case $(stat -f %Lp "$1" 2> /dev/null) in
+		600 | 400) ;;
+		*) fail "the $2 must have the mode 0600: $1" ;;
+	esac
+}
+
+LAYOUT=single
+PASSFILE=''
+SECURE=''
+DATA=''
+if [ -n "$PLAN" ]; then
+	[ -z "$DISK" ] || fail '-d and -p do not go together: the plan names the disks'
+	secret_file "$PLAN" 'plan file'
+	command -v python3 > /dev/null 2>&1 || fail 'reading the plan file needs python3'
+	# The JSON is read by python3 in isolated mode and turned into checked
+	# shell words; nothing of the file is evaluated by the shell.
+	_pv=$(python3 -I - "$PLAN" <<'PLANPY'
+import json, re, sys
+def err(m):
+    print("ERR " + m); sys.exit(0)
+try:
+    p = json.load(open(sys.argv[1]))
+except Exception as e:
+    err("the plan file is not JSON: %s" % e)
+if not isinstance(p, dict):
+    err("the plan file is not a JSON object")
+KEYS = {"version", "mode", "usage", "boot", "disks", "layout", "filesystem", "encryption",
+        "swap_mb", "sector_4k", "trim", "wipe", "confirm_foreign", "alongside", "partitions", "data"}
+if set(p) - KEYS:
+    err("the plan has unknown keys: " + ", ".join(sorted(set(p) - KEYS)))
+if p.get("version") != 1:
+    err("the plan is not version 1")
+mode = p.get("mode", "erase")
+if mode != "erase":
+    err("the mode %r is not offered on OpenBSD yet (erase and install only)" % (mode,))
+if p.get("partitions") not in (None, []) or p.get("alongside") not in (None, {}):
+    err("manual partitions and install alongside are not offered on OpenBSD yet")
+data = p.get("data") or []
+if not isinstance(data, list):
+    err("data is not a list")
+usage = p.get("usage", "together")
+if usage not in ("together", "separate"):
+    err("usage is together or separate")
+dlines = []
+used = set()
+mounts = set()
+for i, d in enumerate(data):
+    if not isinstance(d, dict) or set(d) - {"name", "disks", "layout", "filesystem", "mount"}:
+        err("data %d is not {name, disks, layout, filesystem, mount}" % i)
+    if not isinstance(d.get("name"), str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", d["name"]):
+        err("data %d has no valid name" % i)
+    dd = d.get("disks")
+    if not isinstance(dd, list) or len(dd) != 1 or not isinstance(dd[0], str) or not re.fullmatch(r"[a-z]+[0-9]+", dd[0]):
+        err("data %s: OpenBSD data disks are single disks (one disk each)" % d["name"])
+    if d.get("layout", "single") != "single" or d.get("filesystem", "ffs") != "ffs":
+        err("data %s: a single disk with FFS" % d["name"])
+    m = d.get("mount")
+    if not isinstance(m, str) or not re.fullmatch(r"/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", m) or "/.." in m or m in mounts:
+        err("data %s: the mount point is not an absolute, unique path" % d["name"])
+    mounts.add(m)
+    used.add(dd[0])
+    dlines.append("%s %s" % (dd[0], m))
+disks = p.get("disks")
+if not isinstance(disks, list) or not disks or not all(isinstance(d, str) for d in disks):
+    err("the plan names no disks")
+if len(set(disks)) != len(disks):
+    err("the plan names a disk twice")
+for d in disks:
+    if not re.fullmatch(r"[a-z]+[0-9]+", d):
+        err("not a disk name in the plan: %r" % (d,))
+    if d in used:
+        err("the disk %s is a system disk and a data disk" % d)
+if usage == "separate" and (len(disks) != 1 or p.get("layout", "single") != "single"):
+    err("usage separate puts the system on one disk with the single layout")
+layout = p.get("layout", "single")
+if layout not in ("single", "raid1"):
+    err("the layout %r is not one OpenBSD can boot from (single, raid1)" % (layout,))
+fs = p.get("filesystem", "ffs")
+if fs != "ffs":
+    err("the filesystem %r is not offered on OpenBSD (ffs)" % (fs,))
+enc = p.get("encryption") or {}
+if not isinstance(enc, dict) or set(enc) - {"enabled", "swap"} or not all(isinstance(v, bool) for v in enc.values()):
+    err("encryption is not {enabled, swap} of true or false")
+swap = p.get("swap_mb")
+if swap is not None and (not isinstance(swap, int) or isinstance(swap, bool) or not 0 <= swap <= 1048576):
+    err("the swap size of the plan is not a number of MB")
+boot = p.get("boot", "uefi")
+if boot not in ("uefi", "bios"):
+    err("the boot mode %r is not uefi or bios" % (boot,))
+wipe = p.get("wipe") or {}
+if not isinstance(wipe, dict) or any(w not in ("quick", "secure") or (k not in disks and k not in used) for k, w in wipe.items()):
+    err("the wipe of the plan names a disk of another plan or a way that is not quick or secure")
+if enc.get("swap") and not swap:
+    err("encrypted swap needs swap")
+print("DISKS " + " ".join(disks))
+print("LAYOUT " + layout)
+print("ENCRYPT " + ("yes" if enc.get("enabled") else "no"))
+print("SWAP " + ("" if swap is None else str(swap)))
+print("SECURE " + " ".join(k for k, w in wipe.items() if w == "secure"))
+for l in dlines:
+    print("DATA " + l)
+PLANPY
+	) || fail 'cannot read the plan file'
+	case $_pv in
+		ERR*) fail "$(printf '%s\n' "$_pv" | sed -n 's/^ERR //p' | head -n 1)" ;;
+	esac
+	DISKS=$(printf '%s\n' "$_pv" | sed -n 's/^DISKS //p')
+	LAYOUT=$(printf '%s\n' "$_pv" | sed -n 's/^LAYOUT //p')
+	SECURE=$(printf '%s\n' "$_pv" | sed -n 's/^SECURE //p')
+	DATA=$(printf '%s\n' "$_pv" | sed -n 's/^DATA //p')
+	if [ "$(printf '%s\n' "$_pv" | sed -n 's/^ENCRYPT //p')" = yes ]; then
+		[ -n "$EPASS" ] || fail 'the plan encrypts the system: the passphrase is required (-E PASSFILE)'
+		PASSFILE=$EPASS
+	fi
+	_ps=$(printf '%s\n' "$_pv" | sed -n 's/^SWAP //p')
+	[ -z "$_ps" ] || SWAP_MB=$_ps
+else
+	[ -n "$DISK" ] || fail 'the disk is required: -d DISK (sd1, wd0, ...) or -p PLANFILE'
+	DISKS=$DISK
+	[ -z "$EPASS" ] || PASSFILE=$EPASS
+fi
+_nd=0
+for _d in $DISKS; do
+	case $_d in
+		[a-z]*[0-9]) ;;
+		*) fail "not a disk name: $_d (sd1, wd0, ...)" ;;
+	esac
+	case $_d in
+		*[!a-z0-9]*) fail "not a disk name: $_d (sd1, wd0, ...)" ;;
+		cd[0-9]* | rd[0-9]* | vnd[0-9]* | fd[0-9]*) fail "not a disk to install onto: $_d" ;;
+	esac
+	_nd=$((_nd + 1))
+done
+case $LAYOUT in
+	single) [ "$_nd" -eq 1 ] || fail "the single layout takes one disk ($_nd given)" ;;
+	raid1) [ "$_nd" -ge 2 ] || fail "the raid1 layout needs two disks or more ($_nd given)" ;;
+esac
+if [ -n "$PASSFILE" ]; then
+	secret_file "$PASSFILE" 'passphrase file'
+	_pl=$(wc -c < "$PASSFILE" | tr -d ' ')
+	[ "$_pl" -ge 8 ] && [ "$_pl" -le 1024 ] || fail 'the passphrase file must hold 8 to 1024 bytes'
+	[ "$(tr -d '\000' < "$PASSFILE" | wc -c | tr -d ' ')" = "$_pl" ] || fail 'the passphrase file may not hold a NUL byte'
+fi
+if [ -n "$SWAP_MB" ]; then
+	case $SWAP_MB in
+		'' | *[!0-9]*) fail "not a swap size in MB: $SWAP_MB" ;;
+	esac
+fi
+DISK=${DISKS%% *}
+[ "$YES" -eq 1 ] || fail "refusing to erase $DISKS without -y"
+
+[ -n "$NUSER" ] || fail 'the user is required: -u USER'
+case $NUSER in
+	[a-z_]*) ;;
+	*) fail "not a user name: $NUSER (lowercase letters, digits, _ and -, starting with a letter or _)" ;;
+esac
+case $NUSER in
+	*[!a-z0-9_-]*) fail "not a user name: $NUSER (lowercase letters, digits, _ and -, starting with a letter or _)" ;;
+esac
+[ "${#NUSER}" -le 31 ] || fail "the user name is longer than 31 characters: $NUSER"
+case $NUSER in
+	live | root) fail "the user name $NUSER is taken by the system" ;;
+esac
+if u="$NUSER" awk -F: 'BEGIN { u = ENVIRON["u"] } $1 == u { f = 1 } END { exit !f }' /etc/passwd 2> /dev/null; then
+	fail "the user name $NUSER is taken by the system"
+fi
+
+[ -n "$HASHFILE" ] || fail 'the password hash is required: -H HASHFILE'
+[ -f "$HASHFILE" ] && [ ! -L "$HASHFILE" ] || fail "the hash file is not a regular file: $HASHFILE"
+case $(stat -f %Lp "$HASHFILE" 2> /dev/null) in
+	600 | 400) ;;
+	*) fail "the hash file must have the mode 0600: $HASHFILE" ;;
+esac
+[ "$(grep -c . "$HASHFILE")" = 1 ] || fail "the hash file must hold one bcrypt hash: $HASHFILE"
+# a bcrypt hash: $2a$, $2b$ or $2y$, a cost of two digits, 53 characters
+if ! grep -Eq '^\$2[aby]\$[0-9][0-9]\$[./A-Za-z0-9]{53}$' "$HASHFILE"; then
+	fail "the hash file holds no bcrypt hash (\$2b\$, the crypt(3) of OpenBSD): $HASHFILE"
+fi
+
+KEYLINE=''
+if [ -n "$KEYFILE" ]; then
+	[ -f "$KEYFILE" ] || fail "no such key file: $KEYFILE"
+	KEYLINE=$(grep -v '^[[:space:]]*#' "$KEYFILE" | grep -v '^[[:space:]]*$' || true)
+	[ "$(printf '%s\n' "$KEYLINE" | grep -c .)" = 1 ] || fail "the key file must hold one public key: $KEYFILE"
+	case ${KEYLINE%% *} in
+		ssh-ed25519 | ssh-rsa | ecdsa-sha2-nistp256 | ecdsa-sha2-nistp384 | ecdsa-sha2-nistp521 \
+		| sk-ssh-ed25519@''openssh.com | sk-ecdsa-sha2-nistp256@''openssh.com) ;;
+		*) fail "the key file holds no public key of a known type: $KEYFILE" ;;
+	esac
+fi
+
+if [ -n "$NHOST" ]; then
+	printf '%s' "$NHOST" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*$' \
+		|| fail "not a host name: $NHOST"
+fi
+case $TZONE in
+	'' | /* | *..* | *[!A-Za-z0-9_+/-]*) fail "not a time zone: $TZONE" ;;
+esac
+[ -f "/usr/share/zoneinfo/$TZONE" ] || fail "no such time zone: $TZONE"
+case $FULLNAME in
+	*:* | *[[:cntrl:]]*) fail 'the full name may not hold a colon or a control character' ;;
+esac
+[ "${#FULLNAME}" -le 100 ] || fail 'the full name is longer than 100 characters'
+
+# ip6 <value> — an IPv6 address: hex groups of 1-4 digits and colons, at
+# most one empty group run (the compressed form), no three colons in a row
+ip6() {
+	case $1 in
+		*:*) ;;
+		*) return 1 ;;
+	esac
+	case $1 in
+		*[!0-9A-Fa-f:]*) return 1 ;;
+	esac
+	printf '%s\n' "$1" | awk '{
+		n = gsub(/[:][:]/, "&")
+		if (n > 1 || index($0, ":" ":" ":") > 0) exit 1
+		m = split($0, g, ":")
+		for (i = 1; i <= m; i++) if (length(g[i]) > 4) exit 1
+		if (m > 8) exit 1
+	}'
+}
+# quad <value> — a dotted quad, octets 0-255 without leading zeros
+quad() {
+	printf '%s\n' "$1" | grep -Eq '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
+}
+for _n in $NETS; do
+	_if=${_n%%:*}
+	printf '%s\n' "$_if" | grep -Eq '^[a-z]+[0-9]+$' || fail "not a network adapter: $_if (-N IF:ADDR/MASK:GW or IF:dhcp)"
+	_cfg=${_n#*:}
+	[ "$_cfg" != "$_n" ] || fail "-N $_n: IF:ADDR/MASK:GW or IF:dhcp"
+	[ "$_cfg" = dhcp ] && continue
+	_addr=${_cfg%%/*}
+	_rest=${_cfg#*/}
+	_mask=${_rest%%:*}
+	_gw=${_rest#*:}
+	[ "$_rest" != "$_cfg" ] && [ "$_gw" != "$_rest" ] || fail "-N $_n: IF:ADDR/MASK:GW or IF:dhcp"
+	case $_addr in
+		*:*) fail "-N $_n: -N is IPv4; an IPv6 address goes with -6" ;;
+		*)
+			quad "$_addr" || fail "-N $_n: not an IPv4 address: $_addr"
+			case $_mask in
+				[0-9] | [12][0-9] | 3[0-2]) ;;
+				*) quad "$_mask" || fail "-N $_n: not a netmask: $_mask" ;;
+			esac
+			[ -z "$_gw" ] || quad "$_gw" || fail "-N $_n: not a gateway: $_gw"
+			;;
+	esac
+done
+
+if [ -n "$KEYMAP" ]; then
+	case $KEYMAP in
+		*[!a-z.]* | .* | *.) fail "not a keyboard layout: $KEYMAP (us, de, fr, ...)" ;;
+	esac
+fi
+
+if [ -n "$ROOTHASH" ]; then
+	secret_file "$ROOTHASH" 'root hash file'
+	[ "$(grep -c . "$ROOTHASH")" = 1 ] \
+		&& grep -Eq '^\$2[aby]\$[0-9][0-9]\$[./A-Za-z0-9]{53}$' "$ROOTHASH" \
+		|| fail "the root hash file holds no bcrypt hash: $ROOTHASH"
+fi
+if [ -n "$LOCALE" ]; then
+	case $LOCALE in
+		*[!A-Za-z0-9_.@-]* | .*) fail "not a locale: $LOCALE" ;;
+	esac
+	[ "$LOCALE" = C ] || [ "$LOCALE" = POSIX ] || [ -d "$LOCALEDIR/${LOCALE#*.}" ] \
+		|| [ -d "$LOCALEDIR/$LOCALE" ] || fail "no such locale: $LOCALE"
+fi
+case $RTC in
+	utc | local) ;;
+	*) fail "-Z takes utc or local (got: $RTC)" ;;
+esac
+for _a in $DNS; do
+	quad "$_a" || ip6 "$_a" || fail "-D: not an address: $_a"
+done
+# the accepted licences: every id must be an item of the catalogue
+if [ -n "$ACCEPT" ]; then
+	secret_file "$ACCEPT" 'licence acceptance file'
+	command -v python3 > /dev/null 2>&1 || fail 'reading the licence acceptance file needs python3'
+	_av=$(python3 -I - "$ACCEPT" "$SHARE/licensed-software.json" <<'ACCEPTPY'
+import json, sys
+try:
+    acc = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("ERR the licence acceptance file is not JSON: %s" % e); sys.exit(0)
+try:
+    cat = json.load(open(sys.argv[2]))
+except Exception:
+    print("ERR the live image holds no licensed-software.json"); sys.exit(0)
+ids = {i.get("id"): i for i in cat.get("items", []) if isinstance(i, dict)}
+if not isinstance(acc, list):
+    print("ERR the licence acceptance file is not a list"); sys.exit(0)
+for a in acc:
+    if not isinstance(a, dict) or not isinstance(a.get("id"), str):
+        print("ERR an accepted licence has no id"); sys.exit(0)
+    if a["id"] not in ids:
+        print("ERR %r is not an item of the licensed software of this image" % a["id"]); sys.exit(0)
+    for k in ("license", "sha256", "timestamp"):
+        if k not in a:
+            print("ERR the accepted item %r has no %s" % (a["id"], k)); sys.exit(0)
+print("OK %d" % len(acc))
+ACCEPTPY
+	) || fail 'cannot read the licence acceptance file'
+	case $_av in
+		OK*) ;;
+		*) fail "$(printf '%s\n' "$_av" | sed -n 's/^ERR //p' | head -n 1)" ;;
+	esac
+fi
+
+for _n in $NETS6; do
+	_if=${_n%%:*}
+	_cfg=${_n#*:}
+	printf '%s\n' "$_if" | grep -Eq '^[a-z][a-z0-9]{0,14}$' || fail "-6 $_n: not a network adapter"
+	[ "$_cfg" != "$_n" ] || fail "-6 $_n: IF:slaac or IF:ADDR6/PREFIXLEN:GW6"
+	[ "$_cfg" = slaac ] && continue
+	_addr=${_cfg%%/*}
+	_rest=${_cfg#*/}
+	_plen=${_rest%%:*}
+	_gw=${_rest#*:}
+	[ "$_rest" != "$_cfg" ] && [ "$_gw" != "$_rest" ] || fail "-6 $_n: IF:slaac or IF:ADDR6/PREFIXLEN:GW6"
+	ip6 "$_addr" || fail "-6 $_n: not an IPv6 address: $_addr"
+	case $_plen in
+		[1-9] | [1-9][0-9] | 1[01][0-9] | 12[0-8]) ;;
+		*) fail "-6 $_n: not a prefix length (1-128): $_plen" ;;
+	esac
+	[ -z "$_gw" ] || ip6 "$_gw" || fail "-6 $_n: not an IPv6 gateway: $_gw"
+done
+
+WIFI_IF=''
+WIFI_SSID=''
+WIFI_PSK=''
+WIFI_SEC=''
+if [ -n "$WIFIFILE" ]; then
+	secret_file "$WIFIFILE" 'Wi-Fi file'
+	command -v python3 > /dev/null 2>&1 || fail 'reading the Wi-Fi file needs python3'
+	# the JSON is read by python3 and handed back as checked lines; the key
+	# goes to a 0600 file of the work directory, never through an argument
+	_wv=$(python3 -I - "$WIFIFILE" <<'WIFIPY'
+import json, re, sys
+def err(m):
+    print("ERR " + m); sys.exit(0)
+try:
+    w = json.load(open(sys.argv[1]))
+except Exception as e:
+    err("the Wi-Fi file is not JSON: %s" % e)
+if not isinstance(w, dict) or set(w) - {"if", "ssid", "security", "psk"}:
+    err("the Wi-Fi file is not {if, ssid, security, psk}")
+iface, ssid, sec, psk = w.get("if"), w.get("ssid"), w.get("security", "wpa2"), w.get("psk", "")
+if not isinstance(iface, str) or not re.fullmatch(r"[a-z][a-z0-9]{0,14}", iface):
+    err("the Wi-Fi file names no adapter")
+if not isinstance(ssid, str) or not 1 <= len(ssid.encode()) <= 32:
+    err("the Wi-Fi network name has 1 to 32 bytes")
+if sec not in ("wpa2", "wpa3", "open"):
+    err("the Wi-Fi security is wpa2, wpa3 or open")
+if not isinstance(psk, str):
+    err("the Wi-Fi key is not text")
+if sec == "open":
+    psk = ""
+elif not (8 <= len(psk) <= 63 and psk.isprintable()) and not re.fullmatch(r"[0-9A-Fa-f]{64}", psk):
+    err("a WPA key has 8 to 63 printable characters (or 64 hex digits)")
+if any(c in ssid + psk for c in '"\\') or any(ord(c) < 32 for c in ssid + psk):
+    err('the Wi-Fi network name and key may not hold " or \\ or a control character')
+print("IF " + iface)
+print("SEC " + sec)
+print("SSID " + ssid)
+print("PSK " + psk)
+WIFIPY
+	) || fail 'cannot read the Wi-Fi file'
+	case $_wv in
+		ERR*) fail "$(printf '%s\n' "$_wv" | sed -n 's/^ERR //p' | head -n 1)" ;;
+	esac
+	WIFI_IF=$(printf '%s\n' "$_wv" | sed -n 's/^IF //p')
+	WIFI_SEC=$(printf '%s\n' "$_wv" | sed -n 's/^SEC //p')
+	WIFI_SSID=$(printf '%s\n' "$_wv" | sed -n 's/^SSID //p')
+	WIFI_PSK=$(printf '%s\n' "$_wv" | sed -n 's/^PSK //p')
+	_wv=''
+fi
+
+# --- the disk -------------------------------------------------------------
+
+# root_disk — the disk of the running root: the device of / in mount(8),
+# a name (/dev/sd0a) or a DUID (0123456789abcdef.a)
+root_disk() {
+	_dev=$(mount | awk '$3 == "/" { print $1; exit }')
+	_dev=${_dev#/dev/}
+	case $_dev in
+		[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[a-p])
+			sysctl -n hw.disknames | tr ',' '\n' | u="${_dev%.*}" awk -F: 'BEGIN { u = ENVIRON["u"] } $2 == u { print $1; exit }'
+			;;
+		*) printf '%s\n' "${_dev%[a-p]}" ;;
+	esac
+}
+
+_root=$(root_disk)
+[ -n "$_root" ] || fail 'cannot tell the disk of the running system'
+DATADISKS=$(printf '%s\n' "$DATA" | awk 'NF { print $1 }' | tr '\n' ' ')
+for _d in $DISKS $DATADISKS; do
+	sysctl -n hw.disknames 2> /dev/null | tr ',' '\n' | d="$_d" awk -F: 'BEGIN { d = ENVIRON["d"] } $1 == d { f = 1 } END { exit !f }' \
+		|| fail "no such disk: $_d"
+	[ "$_root" != "$_d" ] || fail "$_d holds the running live system: refusing to install onto it"
+	if mount | d="/dev/$_d" awk 'BEGIN { d = ENVIRON["d"] } index($1, d) == 1 { f = 1 } END { exit !f }'; then
+		fail "$_d has a mounted file system: refusing to install onto it"
+	fi
+done
+
+# The sets: <share>/sets/<release>/<arch>, exactly one release.
+_sd=$(cd "$SHARE/sets" 2> /dev/null && ls -d */* 2> /dev/null)
+[ "$(printf '%s\n' "$_sd" | grep -c .)" = 1 ] || fail "the live image holds no sets in $SHARE/sets"
+SETDIR="$SHARE/sets/$_sd"
+RELEASE=${_sd%/*}
+NN=$(printf '%s' "$RELEASE" | tr -d '.')
+for _s in $SETS; do
+	[ -f "$SETDIR/$_s$NN.tgz" ] || fail "the live image holds no $_s$NN.tgz in $SETDIR"
+done
+[ -f "$SETDIR/site$NN.tgz" ] || fail "the live image holds no site set site$NN.tgz in $SETDIR"
+for _k in bsd bsd.mp bsd.rd; do
+	[ -f "$SETDIR/$_k" ] || fail "the live image holds no kernel $_k in $SETDIR"
+done
+
+# --- the cleanup ----------------------------------------------------------
+
+W=$(mktemp -d "/tmp/$SLUG-install.XXXXXX") || fail 'cannot create the work directory'
+T="$W/root"
+MOUNTED=''
+cleanup() {
+	for _m in $MOUNTED; do
+		umount "$_m" 2> /dev/null || umount -f "$_m" 2> /dev/null || true
+	done
+	MOUNTED=''
+	rm -rf -- "$W" 2> /dev/null || true
+}
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM HUP
+
+# run <message> <cmd...> — a tool, its output on stderr; fail on error
+run() {
+	_m=$1
+	shift
+	"$@" >&2 || fail "$_m"
+}
+
+# --- 1. the partitions ----------------------------------------------------
+
+# Every disk of the plan gets the GPT of the installer: an EFI system
+# partition (the boot loader goes on each, so any of them boots) and an
+# OpenBSD partition. With softraid(4) the OpenBSD partition holds one RAID
+# partition 'a', and bioctl(8) makes the volume the system goes on.
+for _d in $SECURE; do
+	progress 1 "Erasing $_d (every block)"
+	dd if=/dev/zero of="$DEVDIR/r${_d}c" bs=1048576 2> /dev/null
+	# dd ends with "end of device"; the disk is erased when it got there
+done
+progress 2 "Partitioning $DISKS"
+for _d in $DISKS; do
+	run "fdisk(8) cannot write the GPT of $_d" fdisk -gy -b 532480 "$_d"
+done
+CHUNKS=''
+if [ "$LAYOUT" = raid1 ] || [ -n "$PASSFILE" ]; then
+	for _d in $DISKS; do
+		# disklabel -E: a, the default offset and size, the type RAID
+		printf 'a a\n\n\nRAID\nw\nq\n' | disklabel -E "$_d" > /dev/null 2>&1 \
+			|| fail "disklabel(8) cannot make the RAID partition of $_d"
+		CHUNKS="$CHUNKS,${_d}a"
+	done
+	CHUNKS=${CHUNKS#,}
+	case $LAYOUT,$PASSFILE in
+		raid1,) _level=1 ;;
+		raid1,*) _level=1C ;;
+		*) _level=C ;;
+	esac
+	progress 4 "Making the softraid volume (RAID $_level)"
+	if [ -n "$PASSFILE" ]; then
+		_out=$(bioctl -C force -c "$_level" -l "$CHUNKS" -p "$PASSFILE" softraid0 2>&1) \
+			|| fail "bioctl(8) cannot make the softraid volume: $(printf '%s' "$_out" | tail -n 1)"
+	else
+		_out=$(bioctl -C force -c "$_level" -l "$CHUNKS" softraid0 2>&1) \
+			|| fail "bioctl(8) cannot make the softraid volume: $(printf '%s' "$_out" | tail -n 1)"
+	fi
+	printf '%s\n' "$_out" >&2
+	# "softraid0: RAID 1 volume attached as sd5" / "CRYPTO volume attached as sd5"
+	VOL=$(printf '%s\n' "$_out" | sed -n 's/.*volume attached as \([a-z]*[0-9]*\).*/\1/p' | tail -n 1)
+	[ -n "$VOL" ] || fail 'bioctl(8) did not say which disk the softraid volume is'
+	# a fresh volume holds no partition table: an MBR spanning it, as the
+	# installer gives a softraid volume
+	run "fdisk(8) cannot initialise $VOL" fdisk -iy "$VOL"
+	ROOTDISK=$VOL
+else
+	ROOTDISK=$DISK
+fi
+# The layout: disklabel's automatic one, or the same with the swap size of
+# the plan (0: no swap).
+if [ -n "$SWAP_MB" ]; then
+	{
+		printf '/ 1G-4G 10%%\n'
+		[ "$SWAP_MB" -eq 0 ] || printf 'swap %sM\n' "$SWAP_MB"
+		printf '/tmp 256M-4G 8%%\n'
+		printf '/var 1G-16G 12%%\n'
+		printf '/usr 3G-* 40%%\n'
+		printf '/home 1G-* 30%%\n'
+	} > "$W/disklabel.template"
+	run "disklabel(8) cannot write the label of $ROOTDISK" disklabel -w -A -T "$W/disklabel.template" -F "$W/fstab" "$ROOTDISK"
+else
+	run "disklabel(8) cannot write the label of $ROOTDISK" disklabel -w -A -F "$W/fstab" "$ROOTDISK"
+fi
+DISK=$ROOTDISK
+DUID=$(disklabel "$DISK" 2> /dev/null | awk '$1 == "duid:" { print $2; exit }')
+[ -n "$DUID" ] || fail "the label of $DISK has no DUID"
+grep -q ' / ffs ' "$W/fstab" || fail "the automatic layout of $DISK has no / file system"
+progress 5 'Making the file systems'
+awk '$3 == "ffs" { print $1 }' "$W/fstab" | while read -r _p; do
+	_part=${_p##*.}
+	newfs -q "/dev/r$DISK$_part" >&2 || exit 1
+done || fail "newfs(8) cannot make the file systems of $DISK"
+for _d in $DISKS; do
+	run "installboot(8) cannot prepare the EFI system partition of $_d" installboot -p "$_d"
+done
+
+# the file systems, mounted under $T, shortest mount point first
+mkdir -p "$T"
+awk '$3 == "ffs" { print length($2), $2, $1 }' "$W/fstab" | sort -n | while read -r _l _mp _p; do
+	printf '%s %s\n' "$_mp" "$_p"
+done > "$W/mounts"
+while read -r _mp _p; do
+	mkdir -p "$T$_mp"
+	mount "/dev/$DISK${_p##*.}" "$T${_mp%/}" >&2 || fail "mount(8) cannot mount $_mp of $DISK"
+	MOUNTED="$T${_mp%/} $MOUNTED"
+done < "$W/mounts"
+
+# --- the data disks of the plan: one FFS each, on its own mount point ------
+
+printf '%s\n' "$DATA" | while read -r _d _mp; do
+	[ -n "$_d" ] || continue
+	progress 8 "Preparing the data disk $_d ($_mp)"
+	fdisk -gy "$_d" >&2 || exit 1
+	printf '%s 1M-* 100%%\n' "$_mp" > "$W/data-$_d.template"
+	disklabel -w -A -T "$W/data-$_d.template" -F "$W/fstab.$_d" "$_d" >&2 || exit 1
+	_p=$(m="$_mp" awk 'BEGIN { m = ENVIRON["m"] } $2 == m { print $1; exit }' "$W/fstab.$_d")
+	[ -n "$_p" ] || exit 1
+	newfs -q "/dev/r$_d${_p##*.}" >&2 || exit 1
+	cat "$W/fstab.$_d" >> "$W/fstab"
+	mkdir -p "$T$_mp"
+done || fail 'cannot prepare a data disk of the plan'
+
+# --- 2. the sets ----------------------------------------------------------
+
+_pc=10
+for _s in $SETS; do
+	progress "$_pc" "Installing $_s$NN.tgz"
+	tar -xzphf "$SETDIR/$_s$NN.tgz" -C "$T" >&2 || fail "cannot unpack $_s$NN.tgz"
+	# /etc comes from the etc.tgz (xetc.tgz) of the base (xbase) set
+	case $_s in
+		base | xbase)
+			_etc="$T/var/sysmerge/${_s%base}etc.tgz"
+			[ -f "$_etc" ] || fail "$_s$NN.tgz holds no var/sysmerge/${_s%base}etc.tgz"
+			tar -xzphf "$_etc" -C "$T" >&2 || fail "cannot unpack ${_s%base}etc.tgz"
+			;;
+	esac
+	_pc=$((_pc + 6))
+done
+progress 58 'Installing the kernels'
+cp "$SETDIR/bsd.mp" "$T/bsd" && cp "$SETDIR/bsd" "$T/bsd.sp" && cp "$SETDIR/bsd.rd" "$T/bsd.rd" \
+	|| fail 'cannot copy the kernels'
+chmod 0600 "$T/bsd" "$T/bsd.sp" "$T/bsd.rd"
+
+# --- what the installer writes into a new root (install.sub) --------------
+
+progress 60 'Configuring the system'
+cp "$W/fstab" "$T/etc/fstab" || fail 'cannot write /etc/fstab'
+printf 'https://cdn.openbsd.org/pub/OpenBSD\n' > "$T/etc/installurl"
+ln -sf "/usr/share/zoneinfo/$TZONE" "$T/etc/localtime"
+dd if=/dev/random of="$T/etc/random.seed" bs=512 count=1 2> /dev/null
+dd if=/dev/random of="$T/var/db/host.random" bs=65536 count=1 2> /dev/null
+chmod u=rw-t,go= "$T/etc/random.seed" "$T/var/db/host.random"
+( cd "$T/dev" && sh ./MAKEDEV all ) >&2 || fail 'MAKEDEV(8) cannot make the device nodes'
+mkdir -p "$T/usr/src" "$T/usr/obj" "$T/usr/xobj"
+chroot "$T" chown build:wobj /usr/obj /usr/xobj >&2 && chmod 770 "$T/usr/obj" "$T/usr/xobj"
+chroot "$T" chown root:wsrc /usr/src >&2 && chmod 775 "$T/usr/src"
+sha256 "$T/bsd" | sed "s|$T||" > "$T/var/db/kernel.SHA256"
+chmod 0600 "$T/var/db/kernel.SHA256"
+printf '/usr/sbin/fw_update\n' >> "$T/etc/rc.firsttime"
+
+# --- 3. the site set -------------------------------------------------------
+
+progress 62 "Installing site$NN.tgz"
+tar -xzpf "$SETDIR/site$NN.tgz" -C "$T" >&2 || fail "cannot unpack site$NN.tgz"
+# install.site belongs to the unattended install of the response file; the
+# steps it takes are the ones below, for the account of this install
+rm -f "$T/install.site"
+
+# the name of the host: -n, else the name the site set holds
+if [ -n "$NHOST" ]; then
+	case $NHOST in
+		*.*) printf '%s\n' "$NHOST" > "$T/etc/myname" ;;
+		*)
+			_dom=$(sed -n 's/^[^.]*\.//p' "$T/etc/myname" 2> /dev/null)
+			printf '%s%s\n' "$NHOST" "${_dom:+.$_dom}" > "$T/etc/myname"
+			;;
+	esac
+fi
+# the network: -N, or else every Ethernet adapter of this machine asks
+# for an address (hostname.if(5); mygate(5) holds the default route)
+# -N (IPv4) and -6 (IPv6) may name one adapter each: it gets both lines.
+if [ -n "$NETS$NETS6" ]; then
+	_done=' '
+	for _n in $NETS $NETS6; do
+		_if=${_n%%:*}
+		case $_done in
+			*" $_if "*) ;;
+			*) : > "$T/etc/hostname.$_if"; _done="$_done$_if " ;;
+		esac
+	done
+	for _n in $NETS; do
+		_if=${_n%%:*}
+		_cfg=${_n#*:}
+		if [ "$_cfg" = dhcp ]; then
+			printf 'inet autoconf\n' >> "$T/etc/hostname.$_if"
+			# no -6 for this adapter: it also takes IPv6 by SLAAC
+			case " $NETS6" in
+				*" $_if:"*) ;;
+				*) printf 'inet6 autoconf\n' >> "$T/etc/hostname.$_if" ;;
+			esac
+		else
+			_addr=${_cfg%%/*}
+			_rest=${_cfg#*/}
+			_gw=${_rest#*:}
+			_mask=${_rest%%:*}
+			case $_mask in
+				*.*) printf 'inet %s %s\n' "$_addr" "$_mask" >> "$T/etc/hostname.$_if" ;;
+				*) printf 'inet %s/%s\n' "$_addr" "$_mask" >> "$T/etc/hostname.$_if" ;;
+			esac
+			[ -z "$_gw" ] || printf '%s\n' "$_gw" >> "$T/etc/mygate"
+		fi
+	done
+	for _n in $NETS6; do
+		_if=${_n%%:*}
+		_cfg=${_n#*:}
+		if [ "$_cfg" = slaac ]; then
+			printf 'inet6 autoconf\n' >> "$T/etc/hostname.$_if"
+		else
+			_rest=${_cfg#*/}
+			_gw=${_rest#*:}
+			printf 'inet6 %s %s\n' "${_cfg%%/*}" "${_rest%%:*}" >> "$T/etc/hostname.$_if"
+			[ -z "$_gw" ] || printf '%s\n' "$_gw" >> "$T/etc/mygate"
+		fi
+	done
+	for _if in $_done; do
+		chmod 0640 "$T/etc/hostname.$_if"
+	done
+elif [ -n "$WIFI_IF" ]; then
+	:
+else
+	ifconfig 2> /dev/null | awk '/^[a-z]+[0-9]+: flags=/ { sub(/:$/, "", $1); n = $1 } /media: Ethernet/ { print n }' \
+		| while read -r _if; do
+			printf 'inet autoconf\ninet6 autoconf\n' > "$T/etc/hostname.$_if"
+			chmod 0640 "$T/etc/hostname.$_if"
+		done
+fi
+# Wi-Fi: ifconfig join (WPA2/WPA3 with a key, open without one), then DHCP
+# and SLAAC. The key stays in the file of the adapter, mode 0640, root.
+if [ -n "$WIFI_IF" ]; then
+	{
+		# wpa3 networks are joined the same way: the key, and the network
+		# chooses; open networks take no key
+		if [ "$WIFI_SEC" != open ]; then
+			printf 'join "%s" wpakey "%s"\n' "$WIFI_SSID" "$WIFI_PSK"
+		else
+			printf 'join "%s"\n' "$WIFI_SSID"
+		fi
+		printf 'inet autoconf\ninet6 autoconf\n'
+	} > "$T/etc/hostname.$WIFI_IF"
+	chmod 0640 "$T/etc/hostname.$WIFI_IF"
+fi
+# the name servers
+if [ -n "$DNS" ]; then
+	for _a in $DNS; do printf 'nameserver %s\n' "$_a"; done > "$T/etc/resolv.conf"
+fi
+# the ssh host keys
+chroot "$T" ssh-keygen -A >&2 || true
+
+# the firmware this machine needs (Wi-Fi, GPU, ...), from the firmware the
+# live image carries: no network needed (fw_update -p)
+if [ -d "$SHARE/firmware" ]; then
+	progress 64 'Installing the firmware'
+	DESTDIR=$T fw_update -p "$SHARE/firmware" >&2 || progress 64 'Some firmware could not be installed (fw_update runs again at the first boot)'
+fi
+
+# --- 4. the packages ------------------------------------------------------
+
+_pl="$T/usr/local/share/$SLUG/packages.list"
+PKGS=''
+if [ -f "$_pl" ]; then
+	PKGS=$(sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$_pl" | grep -v '^$' | tr '\n' ' ')
+fi
+if [ -n "$PKGS" ]; then
+	progress 66 'Installing the packages'
+	_cache="/var/cache/$SLUG-packages"
+	mkdir -p "$T$_cache"
+	cp "$SHARE/packages/"*.tgz "$T$_cache/" 2> /dev/null || fail "the live image holds no package cache in $SHARE/packages"
+	chroot "$T" ldconfig /usr/lib /usr/X11R6/lib /usr/local/lib >&2
+	# shellcheck disable=SC2086
+	chroot "$T" env PKG_PATH="$_cache/" pkg_add -I $PKGS >&2 \
+		|| fail "pkg_add(1) cannot install the packages: $PKGS"
+	rm -rf -- "$T$_cache"
+	rm -f "$T/var/run/ld.so.hints"
+fi
+
+# --- 5. the account -------------------------------------------------------
+
+progress 88 "Creating the account $NUSER"
+chroot "$T" useradd -m -G wheel -s /bin/ksh -c "${FULLNAME:-$NUSER}" "$NUSER" >&2 \
+	|| fail "useradd(8) cannot create the account $NUSER"
+# The hash goes into master.passwd from the file, never through an
+# argument, and the databases are rebuilt for the new root.
+_mp="$T/etc/master.passwd"
+( umask 077
+  OFS=: u="$NUSER" hf="$HASHFILE" awk -F: 'BEGIN { OFS = ENVIRON["OFS"]; u = ENVIRON["u"]; hf = ENVIRON["hf"] } 
+	BEGIN { getline h < hf; close(hf) }
+	$1 == u { $2 = h; found = 1 }
+	{ print }
+	END { if (!found) exit 1 }' "$_mp" > "$W/master.passwd" ) \
+	|| fail "cannot write the password of $NUSER"
+cat "$W/master.passwd" > "$_mp"
+rm -f "$W/master.passwd"
+pwd_mkdb -p -d "$T/etc" "$_mp" >&2 || fail 'pwd_mkdb(8) cannot rebuild the password databases'
+if [ -n "$KEYLINE" ]; then
+	_home=$(u="$NUSER" awk -F: 'BEGIN { u = ENVIRON["u"] } $1 == u { print $6 }' "$T/etc/passwd")
+	mkdir -p "$T$_home/.ssh"
+	printf '%s\n' "$KEYLINE" > "$T$_home/.ssh/authorized_keys"
+	chmod 0700 "$T$_home/.ssh"
+	chmod 0600 "$T$_home/.ssh/authorized_keys"
+	chroot "$T" chown -R "$NUSER:$NUSER" "$_home/.ssh" >&2 || fail "cannot hand $_home/.ssh to $NUSER"
+fi
+
+# root: locked (13 asterisks, as the installer writes for "no password"),
+# or the bcrypt hash of -r FILE, read from its file
+( umask 077
+  OFS=: hf="${ROOTHASH:-}" awk -F: 'BEGIN { OFS = ENVIRON["OFS"]; hf = ENVIRON["hf"] } 
+	BEGIN { h = "*************"; if (hf != "") { getline h < hf; close(hf) } }
+	$1 == "root" { $2 = h }
+	{ print }' "$_mp" > "$W/master.passwd" ) || fail 'cannot write the password of root'
+cat "$W/master.passwd" > "$_mp"
+rm -f "$W/master.passwd"
+pwd_mkdb -p -d "$T/etc" "$_mp" >&2 || fail 'pwd_mkdb(8) cannot rebuild the password databases'
+
+_home=$(u="$NUSER" awk -F: 'BEGIN { u = ENVIRON["u"] } $1 == u { print $6 }' "$T/etc/passwd")
+# the language of the account: LANG in its login profile and its X session
+if [ -n "$LOCALE" ]; then
+	printf 'export LANG=%s\n' "$LOCALE" >> "$T$_home/.profile"
+	if [ -f "$T$_home/.xsession" ]; then
+		{ sed -n '1p' "$T$_home/.xsession"; printf 'export LANG=%s\n' "$LOCALE"; sed '1d' "$T$_home/.xsession"; } \
+			> "$W/xsession" && cat "$W/xsession" > "$T$_home/.xsession"
+	fi
+fi
+# the hardware clock: UTC, or local time (kern.utc_offset in minutes)
+if [ "$RTC" = local ]; then
+	_z=$(TZ=$TZONE date +%z)
+	_s=${_z%????}
+	_h=${_z#?}
+	_m=${_h#??}
+	_h=${_h%??}
+	_h=${_h#0}
+	_m=${_m#0}
+	_off=$((_h * 60 + _m))
+	[ "$_s" = - ] && _off=$((-_off))
+	printf 'kern.utc_offset=%s\n' "$_off" >> "$T/etc/sysctl.conf"
+fi
+# automatic login: the account's X session at boot instead of the greeter
+# of xenodm(1) (rc.d/<slug>_autologin of the site set)
+if [ "$AUTOLOGIN" -eq 1 ]; then
+	[ -f "$T/etc/rc.d/${SLUG}_autologin" ] || fail "the site set holds no rc.d/${SLUG}_autologin"
+	{
+		printf '\n# %s-install: automatic login of %s\n' "$SLUG" "$NUSER"
+		printf 'xenodm_flags=NO\n'
+		printf '%s_autologin_flags=%s\n' "$SLUG" "$NUSER"
+		printf 'pkg_scripts="${pkg_scripts} %s_autologin"\n' "$SLUG"
+	} >> "$T/etc/rc.conf.local"
+fi
+# updates at the first boot (online): the patches of the release and the
+# packages
+if [ "$UPDATE" -eq 1 ]; then
+	printf '/usr/sbin/syspatch\n/usr/sbin/pkg_add -u\n' >> "$T/etc/rc.firsttime"
+fi
+# the greeter of xenodm(1) carries the branding of the product: logo,
+# name, colours, background and the identity line
+_bx="$T/usr/local/libexec/$SLUG/brand-xenodm"
+if [ -f "$_bx" ] && [ -d "$T/etc/X11/xenodm" ]; then
+	sh "$_bx" "$T" || fail 'cannot brand the greeter of xenodm(1)'
+fi
+# the login banner of getty(8)
+if [ -f "$T/usr/local/libexec/$SLUG/brand-getty" ]; then
+	sh "$T/usr/local/libexec/$SLUG/brand-getty" "$T" || fail 'cannot brand the login banner of getty(8)'
+fi
+
+# the record of the accepted licences (none needed on OpenBSD; the record
+# says so)
+if [ -n "$ACCEPT" ]; then
+	mkdir -p "$T/var/db/$SLUG"
+	cp "$ACCEPT" "$T/var/db/$SLUG/licenses-accepted.json"
+	chmod 0644 "$T/var/db/$SLUG/licenses-accepted.json"
+fi
+
+# -P: the account becomes root with doas(1) without its password
+if [ "$NOPASS" -eq 1 ]; then
+	printf 'permit nopass %s as root\n' "$NUSER" >> "$T/etc/doas.conf"
+	chmod 0600 "$T/etc/doas.conf"
+fi
+
+# The installer of the live image is never copied to the new root; the
+# paths of its MANIFEST (install-into-stage.sh) are removed all the same,
+# so a site set that carried one of them does not keep it.
+_man=$MANIFEST
+if [ -f "$_man" ]; then
+	while IFS= read -r _p; do
+		case $_p in
+			/*) ;;
+			*) continue ;;
+		esac
+		case /$_p/ in
+			*/../* | */./*) continue ;;
+		esac
+		[ ! -f "$T$_p" ] && [ ! -L "$T$_p" ] || rm -f -- "$T$_p"
+	done < "$_man"
+fi
+
+# the keyboard layout: wscons(4) at boot, and the X server
+if [ -n "$KEYMAP" ] && [ "$KEYMAP" != us ]; then
+	printf 'keyboard.encoding=%s\n' "$KEYMAP" >> "$T/etc/wsconsctl.conf"
+	case ${KEYMAP%%.*} in
+		uk) _xkb=gb ;;
+		sv) _xkb=se ;;
+		sg | sf) _xkb=ch ;;
+		la) _xkb=latam ;;
+		*) _xkb=${KEYMAP%%.*} ;;
+	esac
+	mkdir -p "$T/etc/X11/xorg.conf.d"
+	{
+		printf 'Section "InputClass"\n'
+		printf '\tIdentifier "%s keyboard"\n' "$SLUG"
+		printf '\tMatchIsKeyboard "on"\n'
+		printf '\tOption "XkbLayout" "%s"\n' "$_xkb"
+		printf 'EndSection\n'
+	} > "$T/etc/X11/xorg.conf.d/00-$SLUG-keyboard.conf"
+fi
+
+# --- 6. the boot loader ---------------------------------------------------
+
+progress 94 'Installing the boot loader'
+installboot -c -r "$T" "$DISK" >&2 || installboot -r "$T" "$DISK" >&2 \
+	|| fail "installboot(8) cannot install the boot loader on $DISK"
+
+progress 97 'Writing the disk'
+sync
+# a file system may stay busy for a moment after the last write (softraid,
+# pkg_add's helpers): a few tries before it counts as a failure
+for _m in $MOUNTED; do
+	_try=0
+	until umount "$_m" >&2; do
+		_try=$((_try + 1))
+		[ "$_try" -lt 10 ] || fail "umount(8) cannot unmount $_m"
+		sync
+		sleep 2
+	done
+	MOUNTED=${MOUNTED#"$_m "}
+done
+MOUNTED=''
+progress 100 "@DISTRO_NAME@ is installed on $DISK"
+exit 0

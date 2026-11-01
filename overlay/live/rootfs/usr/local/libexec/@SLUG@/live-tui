@@ -1,0 +1,71 @@
+#!/bin/ksh
+#
+# live-tui — the text installer of the live image (the stand-in of the
+# graphical installer): it asks the questions of @SLUG@-install and runs it.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The password is read without echo, hashed with encrypt(1) (bcrypt, the
+# crypt(3) of OpenBSD) and the hash goes to a 0600 file: the cleartext is
+# never written to a disk and never an argument of a process.
+
+# shellcheck disable=SC2154 # ksh: read name?prompt sets the variables
+set -u
+# the installation runs as root through the root helper of the installer
+apply=/usr/local/libexec/wtfbsd-installer/installer-apply
+umask 077
+slug=@SLUG@
+W=$(mktemp -d "/tmp/$slug-tui.XXXXXX") || exit 1
+trap 'rm -rf -- "$W"' EXIT
+
+clear
+print "Install @DISTRO_NAME@"
+print
+print "Type 'live' at the first question to close this window and try the"
+print "live desktop. The \"Install @DISTRO_NAME@\" icon opens it again."
+print
+root=$(mount | awk '$3 == "/" { print $1; exit }')
+print "The disks of this machine (the live system runs from $root):"
+for _d in $(sysctl -n hw.disknames | tr ',' '\n' | cut -d: -f1); do
+	case $_d in cd*|rd*|vnd*|fd*) continue ;; esac
+	print "  $_d  $(dmesg | sed -n "s/^$_d at .*<\(.*\)>.*/\1/p" | tail -n 1)"
+done
+print
+read disk?'Disk to install onto (erased!): '
+[ "$disk" = live ] && exit 0
+read user?'Your user name: '
+while :; do
+	stty -echo
+	read pw1?'Password: '
+	print
+	read pw2?'Password again: '
+	print
+	stty echo
+	[ -n "$pw1" ] && [ "$pw1" = "$pw2" ] && break
+	print 'The passwords are empty or differ; again.'
+done
+# encrypt(1) reads the password from stdin: it never is an argument
+print -r -- "$pw1" | encrypt -b a > "$W/hash" || { print 'encrypt(1) failed'; read _; exit 1; }
+pw1=''
+pw2=''
+chmod 0600 "$W/hash"
+read host?'Host name [@SLUG@]: '
+read tz?'Time zone [UTC]: '
+read km?'Keyboard layout [us]: '
+print
+print "Installing onto $disk ..."
+set -- -d "$disk" -u "$user" -H "$W/hash" -y --progress
+[ -z "$host" ] || set -- "$@" -n "$host"
+[ -z "$tz" ] || set -- "$@" -z "$tz"
+[ -z "$km" ] || set -- "$@" -K "$km"
+doas -n "$apply" "$@" 2> "$W/log"
+rc=$?
+print
+if [ "$rc" -eq 0 ]; then
+	print 'Done: remove the live media and restart the machine.'
+else
+	print "The install failed (exit $rc). The last lines of its log:"
+	tail -n 15 "$W/log"
+fi
+print
+read _?'Press Return to close this window. '

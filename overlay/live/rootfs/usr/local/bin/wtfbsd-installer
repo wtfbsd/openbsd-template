@@ -1,0 +1,20 @@
+#!/bin/sh
+#
+# wtfbsd-installer — the stand-in installer launcher of the live image.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Live image only. When the image is built with the installer-template
+# (INSTALLER_REF or INSTALLER_DIR in product.conf), its install-into-stage.sh
+# replaces this file with the launcher of the graphical installer. Without
+# it, this stand-in runs the text installer (live-tui) full screen in a
+# terminal, as the live user; the installation itself runs as root through
+# the installer's root helper (doas). Closing the terminal leaves the live
+# desktop; the "Install @DISTRO_NAME@" icon opens it again.
+
+tui=/usr/local/libexec/@SLUG@/live-tui
+if [ -n "${DISPLAY:-}" ]; then
+	exec /usr/X11R6/bin/xterm -fullscreen -fa Monospace -fs 14 \
+		-title 'Install @DISTRO_NAME@' -e "$tui"
+fi
+exec "$tui"

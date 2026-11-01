@@ -1,0 +1,82 @@
+#!/bin/sh
+#
+# desktop-defaults — the first Xfce session of an account gets the Xfce
+# theme of @DISTRO_NAME@ and its wallpaper (with the identity line in the
+# lower left corner) on every output of the display.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Run by the session files (.xsession of /etc/skel, the automatic login,
+# the live session) before startxfce4. xfdesktop keys the wallpaper by the
+# name of the output (monitor<name>), so the names come from xrandr(1).
+# An account that already has settings of the desktop keeps them.
+
+# the stamped wallpaper of the artwork pack, or the one this template ships
+W=/usr/local/share/@SLUG@/backgrounds/wallpaper.png
+[ -f "$W" ] || W=/usr/local/share/@SLUG@/backgrounds/wallpaper.svg
+C=${XDG_CONFIG_HOME:-$HOME/.config}/xfce4/xfconf/xfce-perchannel-xml
+F=$C/xfce4-desktop.xml
+
+# The Xfce theme of the artwork template (when the image has it): the
+# panel and the settings, the colours of the window titles (a theme of
+# xfwm4 made of the Default theme's images and the template's colours,
+# which its XPM images take by name) and of GTK. A file the account
+# already has stays as it is.
+X=/usr/local/share/@SLUG@/xfce
+if [ -d "$X" ]; then
+	mkdir -p "$C"
+	for f in xfce4-panel.xml xsettings.xml; do
+		[ -e "$C/$f" ] || [ ! -f "$X/$f" ] || cp "$X/$f" "$C/$f"
+	done
+	T=$HOME/.themes/@SLUG@/xfwm4
+	B=/usr/local/share/themes/Default/xfwm4
+	if [ ! -e "$T" ] && [ -f "$X/xfwm4-themerc" ] && [ -d "$B" ]; then
+		mkdir -p "$T"
+		# the XPM images only: they take the colours of the themerc by
+		# name; the PNG images of the theme have their colours built in
+		for i in "$B"/*.xpm; do
+			[ -f "$i" ] && ln -s "$i" "$T/${i##*/}"
+		done
+		{ cat "$B/themerc" 2> /dev/null; cat "$X/xfwm4-themerc"; } > "$T/themerc"
+	fi
+	if [ ! -e "$C/xfwm4.xml" ] && [ -d "$T" ]; then
+		{
+			printf '<?xml version="1.0" encoding="UTF-8"?>\n\n'
+			printf '<channel name="xfwm4" version="1.0">\n'
+			printf '  <property name="general" type="empty">\n'
+			printf '    <property name="theme" type="string" value="@SLUG@"/>\n'
+			printf '  </property>\n</channel>\n'
+		} > "$C/xfwm4.xml"
+	fi
+	G=${XDG_CONFIG_HOME:-$HOME/.config}/gtk-3.0
+	if [ ! -e "$G/gtk.css" ] && [ -f "$X/gtk-colors.css" ]; then
+		mkdir -p "$G"
+		printf '@import url("%s");\n' "$X/gtk-colors.css" > "$G/gtk.css"
+	fi
+fi
+
+[ -f "$W" ] || exit 0
+[ ! -e "$F" ] || exit 0
+outs=$(xrandr 2> /dev/null | awk '$2 == "connected" { print $1 }')
+[ -n "$outs" ] || outs=default
+mkdir -p "$C" || exit 0
+{
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n\n'
+	printf '<channel name="xfce4-desktop" version="1.0">\n'
+	printf '  <property name="backdrop" type="empty">\n'
+	printf '    <property name="screen0" type="empty">\n'
+	for o in $outs monitor0; do
+		case $o in monitor0) m=monitor0 ;; *) m=monitor$o ;; esac
+		printf '      <property name="%s" type="empty">\n' "$m"
+		printf '        <property name="workspace0" type="empty">\n'
+		printf '          <property name="last-image" type="string" value="%s"/>\n' "$W"
+		# 3: stretched, so the corner with the identity line stays on the screen
+		printf '          <property name="image-style" type="int" value="3"/>\n'
+		printf '        </property>\n'
+		printf '      </property>\n'
+	done
+	printf '    </property>\n'
+	printf '  </property>\n'
+	printf '</channel>\n'
+} > "$F.new" && mv "$F.new" "$F"
+exit 0

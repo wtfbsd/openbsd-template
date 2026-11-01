@@ -284,6 +284,45 @@ pipeline {
 						< inputs.tar > media.iso.tmp \
 						&& mv media.iso.tmp media.iso
 				'''
+				sh '''
+					set -eu
+					# The desktop also gets the live image: the live
+					# verb of the same helper takes site.tgz and
+					# live.tgz (the live set of the build) on stdin and
+					# writes the disk image on stdout. It is compressed
+					# (most of it is empty) and archived here: it never
+					# travels to another node.
+					rm -f -- live.img live.img.gz live.img.tmp
+					nn=$(printf '%s' "$RELEASE" | tr -d '.')
+					case $PROFILE in
+					desktop) loutdir=./out ;;
+					both) loutdir=./out/desktop ;;
+					*) exit 0 ;;
+					esac
+					[ -f "/usr/local/share/wtfbsd-media/install$nn.iso" ] || exit 0
+					linputs="$PWD/.wtfbsd-live-inputs"
+					rm -rf -- "$linputs"
+					mkdir -p "$linputs"
+					lcleanup() {
+						rm -rf -- "$linputs"
+						rm -f -- live-inputs.tar live.img.tmp
+					}
+					trap 'lcleanup' EXIT
+					trap 'exit 129' HUP
+					trap 'exit 130' INT
+					trap 'exit 143' TERM
+					cp "$loutdir/site$nn.tgz" "$linputs/site.tgz" \
+						|| { echo "cannot stage the site set" >&2; exit 1; }
+					cp "$loutdir/live$nn.tgz" "$linputs/live.tgz" \
+						|| { echo "cannot stage the live set" >&2; exit 1; }
+					tar -c -F ustar -f live-inputs.tar -C "$linputs" site.tgz live.tgz \
+						|| { echo "cannot build live-inputs.tar" >&2; exit 1; }
+					doas "$MEDIA_HELPER" live "$RELEASE" "$ARCH" \
+						< live-inputs.tar > live.img.tmp \
+						&& mv live.img.tmp live.img
+					gzip -1 live.img
+				'''
+				archiveArtifacts artifacts: 'live.img.gz', allowEmptyArchive: true, fingerprint: true
 				script {
 					// The boot test runs on another node: the image
 					// travels with a stash.

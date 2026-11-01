@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "os": "openbsd",
+  "product": "@DISTRO_NAME@",
+  "comment": "The items whose licence needs acceptance or restricts use. On OpenBSD there are none: the base system, the packages of the product and the firmware of fw_update(8) are all redistributed by the OpenBSD project without a click-through licence; the firmware is installed by default and its licence texts are the notices of /etc/firmware (the *-license files the firmware packages install).",
+  "items": [],
+  "notices": [
+    {"name": "Firmware (fw_update)", "path": "/etc/firmware", "pattern": "*license*"}
+  ]
+}
