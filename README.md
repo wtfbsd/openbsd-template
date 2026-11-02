@@ -41,7 +41,13 @@ and the menu entry open it again:
 The disk page: the disks OpenBSD detects (fdisk, disklabel, bioctl; the
 live disk is not listed), the layouts this template offers (single disk,
 softraid CRYPTO; RAID 1 and RAID 1C with two disks or more) and the plan
-before and after:
+before and after. Here the disks are used separately:
+
+- sd1 holds the system.
+- sd2 is formatted as a drive on /data. /etc/fstab names it by its disk
+  ID (DUID), so it still mounts when the disks come up in another order.
+- sd3 and sd4 are left as they are.
+
 
 ![The disk page (OpenBSD 8.0)](docs/screenshots/disk.png)
 
