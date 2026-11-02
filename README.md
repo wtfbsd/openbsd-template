@@ -671,8 +671,28 @@ packages own the files under `/etc/xdg`). The motd is the product's own
 OpenBSD supports that is in neither list fails the build.
 
 The installer-template is pinned the same way (`INSTALLER_PIN`, commit
-fcf5a7f); `INSTALLER_DIR` or another `INSTALLER_REF` overrides it and
+ceda104); `INSTALLER_DIR` or another `INSTALLER_REF` overrides it and
 `INSTALLER_REF=none` gives the stand-in text installer.
+
+The product.conf of wtfbsd/agents carries six keys for the live media:
+`INSTALLER_REF`, `INSTALLER_URL`, `PRODUCT_VERSION`, `ARTWORK_VARIANT`,
+`ARTWORK_REF` and `ARTWORK_SHA256`. A value takes the place of the
+template's own (the pinned installer-template and its URL, the build's
+year.month, the `default` variant, the pinned artwork commit and the sha256
+pinned for its pack); an empty value keeps it. With `ARTWORK_SHA256` the
+published pack of `ARTWORK_REF` (release `pack-<commit12>`, named after the
+product unless the commit is the pinned one) is downloaded and checked
+against that sum. A variant the pack does not have is caught in one of
+two ways:
+
+- **The pinned pack** (no `ARTWORK_SHA256`): the template knows its
+  variants, so the build stops at once. Pick a variant that exists.
+- **`ARTWORK_SHA256` given**: the template does not know that pack's
+  variants, so the build stops when the download fails. Check the variant
+  name, the pack release and `ARTWORK_RELEASES`.
+
+`build.sh -n` prints which installer and which artwork a
+product.conf resolves to.
 
 The
 hardware window of the installer reads `/usr/local/libexec/<slug>/hwreport`:

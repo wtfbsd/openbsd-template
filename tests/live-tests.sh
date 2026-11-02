@@ -1802,12 +1802,12 @@ if [ $? -ne 0 ] && grep -q "cannot download the pack of artwork-template 353ef29
 else
 	no 'the pack URL of the pin is release pack-<commit12>, <name>-<commit12>-<variant>.tar.xz'
 fi
-if grep -q '^INSTALLER_PIN=fcf5a7f22f17b79b55fe0abae27205b305cf9a8a$' "$BUILD" \
+if grep -q '^INSTALLER_PIN=ceda104c69eb9aa21e9336244e7e76fd24ed3dec$' "$BUILD" \
 	&& grep -qx "INSTALLER_DIR=''" "$BUILD" && grep -qx "ARTWORK_DIR=''" "$BUILD" \
 	&& ! grep -Eq "^(INSTALLER|ARTWORK)_DIR=[^']|^(INSTALLER|ARTWORK)_DIR='[^']" "$BUILD"; then
-	ok 'build.sh pins installer-template fcf5a7f and names no INSTALLER_DIR or ARTWORK_DIR'
+	ok 'build.sh pins installer-template ceda104 and names no INSTALLER_DIR or ARTWORK_DIR'
 else
-	no 'build.sh pins installer-template fcf5a7f and names no INSTALLER_DIR or ARTWORK_DIR'
+	no 'build.sh pins installer-template ceda104 and names no INSTALLER_DIR or ARTWORK_DIR'
 fi
 
 # the live image brands its greeter too; every session gets the wallpaper
@@ -1842,4 +1842,94 @@ if [ "$_nc" -eq 0 ] && sed -n '/^## What it looks like/,/^## Layout/p' "$repo/RE
 	ok 'every screenshot caption of the README names OpenBSD 8.0'
 else
 	no "every screenshot caption of the README names OpenBSD 8.0 ($_nc do not)"
+fi
+
+# --- the product.conf keys of wtfbsd/agents for the live media ------------------
+# INSTALLER_REF, INSTALLER_URL, PRODUCT_VERSION, ARTWORK_VARIANT, ARTWORK_REF,
+# ARTWORK_SHA256: a value takes the place of the template's pin, an empty one
+# keeps it. (The suite's fixture turns both templates off with "none": these
+# confs drop those two lines and set the keys themselves.)
+# pkconf <name> <lines> — the desktop fixture with the six keys as given
+pkconf() {
+	grep -v -e '^INSTALLER_REF=' -e '^ARTWORK_REF=' -e '^PROFILE=' "$CONF" > "$work/pk-$1.conf"
+	printf "PROFILE='desktop'\n%s\n" "$2" >> "$work/pk-$1.conf"
+}
+_gsum=$(sha256sum "$work/good.tar.xz" | cut -d ' ' -f 1)
+pkconf all "INSTALLER_REF='abcdef1'
+INSTALLER_URL='https://example.org/fork/installer-template.git'
+PRODUCT_VERSION='1.2'
+ARTWORK_VARIANT='cyberpunk'
+ARTWORK_REF='0123456789abcdef'
+ARTWORK_SHA256='$_gsum'"
+sh "$BUILD" -n -c "$work/pk-all.conf" -u operator -k "$KEYFILE" -P "$PWFILE" -o "$work/out-pk-all" > "$work/pk-all.log" 2>&1
+if [ $? -eq 0 ] && grep -q 'installer-template abcdef1 of https://example.org/fork/installer-template.git' "$work/pk-all.log" \
+	&& grep -qF "artwork: artwork-template 0123456789abcdef (cyberpunk), published pack, sha256 $_gsum (product.conf)" "$work/pk-all.log"; then
+	ok 'a product.conf with the six keys of wtfbsd/agents is accepted and its values replace the pins'
+else
+	no "a product.conf with the six keys of wtfbsd/agents is accepted and its values replace the pins (see $work/pk-all.log)"
+fi
+pkconf empty "INSTALLER_REF=''
+INSTALLER_URL=''
+PRODUCT_VERSION=''
+ARTWORK_VARIANT=''
+ARTWORK_REF=''
+ARTWORK_SHA256=''"
+sh "$BUILD" -n -c "$work/pk-empty.conf" -u operator -k "$KEYFILE" -P "$PWFILE" -o "$work/out-pk-empty" > "$work/pk-empty.log" 2>&1
+_prc=$?
+_ipin=$(sed -n 's/^INSTALLER_PIN=//p' "$BUILD")
+_apin=$(sed -n 's/^ARTWORK_PIN=//p' "$BUILD")
+if [ "$_prc" -eq 0 ] && [ -n "$_ipin" ] && [ -n "$_apin" ] \
+	&& grep -q "installer-template $_ipin of https://github.com/wtfbsd/installer-template.git" "$work/pk-empty.log" \
+	&& grep -qF "artwork: artwork-template $_apin (default), published pack, sha256 pinned by this template" "$work/pk-empty.log"; then
+	ok 'empty values of the six keys keep the template defaults (the pinned installer and artwork, variant default)'
+else
+	no "empty values of the six keys keep the template defaults (see $work/pk-empty.log)"
+fi
+# ARTWORK_REF + ARTWORK_SHA256: the published pack of that commit, checked
+_rel2=$work/releases2
+rm -rf "$_rel2"
+mkdir -p "$_rel2/pack-0123456789ab"
+cp "$work/good.tar.xz" "$_rel2/pack-0123456789ab/examplebsd-0123456789ab-cyberpunk.tar.xz"
+pkconf dl "INSTALLER_REF='none'
+ARTWORK_VARIANT='cyberpunk'
+ARTWORK_REF='0123456789abcdef'
+ARTWORK_SHA256='$_gsum'
+ARTWORK_RELEASES='file://$_rel2'"
+rm -rf "$work/out-pk-dl"
+SOURCE_DATE_EPOCH=$_epoch sh "$BUILD" -c "$work/pk-dl.conf" -u operator -k "$KEYFILE" -P "$PWFILE" -o "$work/out-pk-dl" > "$work/pk-dl.log" 2>&1
+if [ $? -eq 0 ] && set_file "$work/out-pk-dl/site80.tgz" "usr/local/share/$SLUG/xenodm/pixmaps/examplebsd-color.xpm" | grep -q 'the pack logo color'; then
+	ok 'ARTWORK_REF with ARTWORK_SHA256 installs the published pack of that commit'
+else
+	no "ARTWORK_REF with ARTWORK_SHA256 installs the published pack of that commit (see $work/pk-dl.log)"
+fi
+sed -i.bak "s/^ARTWORK_SHA256=.*/ARTWORK_SHA256='$(printf '%064d' 1)'/" "$work/pk-dl.conf"
+rm -rf "$work/out-pk-dl"
+sh "$BUILD" -c "$work/pk-dl.conf" -u operator -k "$KEYFILE" -P "$PWFILE" -o "$work/out-pk-dl" > "$work/pk-dl2.log" 2>&1
+if [ $? -ne 0 ] && grep -q 'the artwork pack does not match its sha256' "$work/pk-dl2.log"; then
+	ok 'a pack that does not match ARTWORK_SHA256 is refused'
+else
+	no 'a pack that does not match ARTWORK_SHA256 is refused'
+fi
+pkconf badvar "ARTWORK_VARIANT='neon'"
+sh "$BUILD" -n -c "$work/pk-badvar.conf" -u operator -k "$KEYFILE" -P "$PWFILE" -o "$work/out-pk-badvar" > "$work/pk-badvar.log" 2>&1
+if [ $? -ne 0 ] && grep -q 'the pinned artwork pack has no variant neon' "$work/pk-badvar.log"; then
+	ok 'a variant the pinned artwork pack does not have is refused before the build'
+else
+	no 'a variant the pinned artwork pack does not have is refused before the build'
+fi
+pkconf shadir "ARTWORK_SHA256='$_gsum'
+ARTWORK_DIR='$work'"
+sh "$BUILD" -n -c "$work/pk-shadir.conf" -u operator -k "$KEYFILE" -P "$PWFILE" -o "$work/out-pk-shadir" > "$work/pk-shadir.log" 2>&1
+if [ $? -ne 0 ] && grep -q 'ARTWORK_SHA256 does not go with ARTWORK_DIR' "$work/pk-shadir.log"; then
+	ok 'ARTWORK_SHA256 with ARTWORK_DIR is refused (a checkout is rendered)'
+else
+	no 'ARTWORK_SHA256 with ARTWORK_DIR is refused (a checkout is rendered)'
+fi
+pkconf shanone "ARTWORK_SHA256='$_gsum'
+ARTWORK_REF='none'"
+sh "$BUILD" -n -c "$work/pk-shanone.conf" -u operator -k "$KEYFILE" -P "$PWFILE" -o "$work/out-pk-shanone" > "$work/pk-shanone.log" 2>&1
+if [ $? -ne 0 ] && grep -q 'ARTWORK_SHA256 does not go with ARTWORK_REF=none' "$work/pk-shanone.log"; then
+	ok 'ARTWORK_SHA256 with ARTWORK_REF=none is refused (the template branding is not a pack)'
+else
+	no 'ARTWORK_SHA256 with ARTWORK_REF=none is refused (the template branding is not a pack)' "$(cat "$work/pk-shanone.log")"
 fi
