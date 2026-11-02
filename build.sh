@@ -110,7 +110,7 @@ BRAND_URL CI_ENABLED PUBLISH_METHOD PUBLISH_TARGET PUBLISHER_ORG
 NET_IF NET_IPV4 NET_NETMASK NET_GATEWAY NET_DNS DOMAIN
 INSTALLER_REF INSTALLER_URL INSTALLER_DIR
 ARTWORK_REF ARTWORK_URL ARTWORK_DIR ARTWORK_VARIANT PRODUCT_VERSION
-ARTWORK_PACK ARTWORK_PACK_SHA256 ARTWORK_RELEASES'
+ARTWORK_PACK ARTWORK_PACK_SHA256 ARTWORK_RELEASES ARTWORK_SHA256'
 for _k in $KNOWN_KEYS; do unset "$_k"; done
 # The answers of the network are optional: they are empty when the
 # product.conf does not hold them.
@@ -133,10 +133,13 @@ ARTWORK_URL=''
 ARTWORK_DIR=''
 ARTWORK_PACK=''
 ARTWORK_PACK_SHA256=''
+# the sha256 of the artwork pack of ARTWORK_REF (wtfbsd/agents product.conf):
+# empty means the sum pinned below for the template's own pack
+ARTWORK_SHA256=''
 # The pinned commits of the installer-template and the artwork template:
 # used when product.conf names neither a ref nor a directory ("none" turns
 # either off: the stand-in installer, the branding this template ships).
-INSTALLER_PIN=fcf5a7f22f17b79b55fe0abae27205b305cf9a8a
+INSTALLER_PIN=ceda104c69eb9aa21e9336244e7e76fd24ed3dec
 ARTWORK_PIN=353ef29aa000eda6c1f274774170a7a691768490
 # The pre-rendered packs published for the pinned artwork commit (release
 # pack-<commit12> of the artwork template): <commit12>:<variant>:<name>:<sha256>.
@@ -206,6 +209,7 @@ while IFS= read -r _line || [ -n "$_line" ]; do
 	ARTWORK_PACK) ARTWORK_PACK=$_v ;;
 	ARTWORK_PACK_SHA256) ARTWORK_PACK_SHA256=$_v ;;
 	ARTWORK_RELEASES) ARTWORK_RELEASES=$_v ;;
+	ARTWORK_SHA256) ARTWORK_SHA256=$_v ;;
 	ARTWORK_VARIANT) ARTWORK_VARIANT=$_v ;;
 	PRODUCT_VERSION) PRODUCT_VERSION=$_v ;;
 	esac
@@ -563,6 +567,13 @@ _art_pin=yes
 	|| die 'ARTWORK_REF does not go with ARTWORK_DIR or ARTWORK_PACK: name one artwork template'
 [ -z "$ARTWORK_PACK" ] || [ -z "$ARTWORK_DIR" ] \
 	|| die 'ARTWORK_PACK and ARTWORK_DIR do not go together: name one artwork template'
+if [ -n "$ARTWORK_SHA256" ]; then
+	chk '^[0-9a-f]{64}$' "$ARTWORK_SHA256" 'ARTWORK_SHA256 must be the sha256 of the artwork pack (64 hex digits)'
+	[ -z "$ARTWORK_DIR" ] || die 'ARTWORK_SHA256 does not go with ARTWORK_DIR: a checkout is rendered, not downloaded'
+	[ "$_art_pin" = yes ] || die 'ARTWORK_SHA256 does not go with ARTWORK_REF=none: the template'"'"'s own branding is not a pack'
+	# a pack file named by ARTWORK_PACK takes it as its sum
+	[ -z "$ARTWORK_PACK" ] || [ -n "$ARTWORK_PACK_SHA256" ] || ARTWORK_PACK_SHA256=$ARTWORK_SHA256
+fi
 if [ -n "$ARTWORK_PACK" ]; then
 	chk '^[0-9a-f]{64}$' "$ARTWORK_PACK_SHA256" 'ARTWORK_PACK needs ARTWORK_PACK_SHA256, the sha256 of the pack (64 hex digits)'
 	case $ARTWORK_PACK in
@@ -574,6 +585,13 @@ fi
 # where the packs of a release are downloaded from
 ARTWORK_RELEASES=${ARTWORK_RELEASES:-https://github.com/wtfbsd/artwork-template/releases/download}
 chk '^(https|file)://[A-Za-z0-9._~/:@%+-]+$' "$ARTWORK_RELEASES" 'ARTWORK_RELEASES must be an https:// or file:// URL'
+ARTWORK_VARIANT=${ARTWORK_VARIANT:-default}
+# the pinned commit is downloaded as its published pack: the variant must be
+# one of the packs pinned here (a product with its own pack gives its sum)
+if [ "$ARTWORK_REF" = "$ARTWORK_PIN" ] && [ -z "$ARTWORK_SHA256" ]; then
+	printf '%s\n' "$ARTWORK_PACK_SUMS" | v="$ARTWORK_VARIANT" awk -F: 'BEGIN { v = ENVIRON["v"] } $2 == v { f = 1 } END { exit !f }' \
+		|| die "the pinned artwork pack has no variant $ARTWORK_VARIANT (pinned: $(printf '%s\n' "$ARTWORK_PACK_SUMS" | cut -d: -f2 | tr '\n' ' '))"
+fi
 if [ -n "$ARTWORK_REF" ]; then
 	chk '^[A-Za-z0-9_][A-Za-z0-9._/-]*$' "$ARTWORK_REF" 'ARTWORK_REF must be a git ref or commit (letters, digits, . _ / -; not starting with -)'
 	chk '^(https|file)://[A-Za-z0-9._~/:@%+-]+$' "$ARTWORK_URL" 'ARTWORK_URL must be an https:// or file:// URL'
@@ -969,6 +987,20 @@ log "  base     $([ "$BUILD_BASE" = yes ] && printf 'release(8) in %s (OpenBSD o
 # installed system never gets any of it: <slug>-install installs the signed
 # sets and the site set only.
 
+artwork_source() { # where the branding of the desktop comes from
+	if [ -n "$ARTWORK_PACK" ]; then
+		printf 'the pack %s (%s), sha256 %s\n' "$ARTWORK_PACK" "$ARTWORK_VARIANT" "$ARTWORK_PACK_SHA256"
+	elif [ -n "$ARTWORK_DIR" ]; then
+		printf 'artwork-template from %s (%s), rendered\n' "$ARTWORK_DIR" "$ARTWORK_VARIANT"
+	elif [ -z "$ARTWORK_REF" ]; then
+		printf 'the branding this template ships (ARTWORK_REF=none)\n'
+	elif [ -n "$ARTWORK_SHA256" ]; then
+		printf 'artwork-template %s (%s), published pack, sha256 %s (product.conf)\n' "$ARTWORK_REF" "$ARTWORK_VARIANT" "$ARTWORK_SHA256"
+	else
+		printf 'artwork-template %s (%s), published pack, sha256 pinned by this template\n' "$ARTWORK_REF" "$ARTWORK_VARIANT"
+	fi
+}
+
 installer_source() { # how the live set gets its installer
 	if [ -n "$INSTALLER_DIR" ]; then
 		printf 'installer-template from %s\n' "$INSTALLER_DIR"
@@ -1149,6 +1181,18 @@ artwork_pack() { # artwork_pack <dir> — the verified pack of the variant, unpa
 				;;
 		esac
 		_want=$ARTWORK_PACK_SHA256
+	elif [ -z "$ARTWORK_DIR" ] && [ -n "$ARTWORK_SHA256" ]; then
+		# product.conf names the sum of the pack (wtfbsd/agents
+		# ARTWORK_SHA256): the published pack of ARTWORK_REF, checked
+		# against that sum. Its name is the one pinned for a known commit,
+		# else the product's own (a fork's pack is named after its product).
+		_c=$(printf '%s' "$ARTWORK_REF" | cut -c1-12)
+		_n=$(printf '%s\n' "$ARTWORK_PACK_SUMS" | c="$_c" awk -F: 'BEGIN { c = ENVIRON["c"] } $1 == c { print $3; exit }')
+		_n=${_n:-$DISTRO_SLUG}
+		_want=$ARTWORK_SHA256
+		_u="$ARTWORK_RELEASES/pack-$_c/$_n-$_c-$ARTWORK_VARIANT.tar.xz"
+		fetch_https "$_u" "$_ap/in/pack.tar.xz" \
+			|| die "cannot download the pack of artwork-template $ARTWORK_REF ($ARTWORK_VARIANT): $_u (check that its pack release has this variant, that ARTWORK_RELEASES is right, and that the host is reachable)"
 	elif _rel=$(printf '%s\n' "$ARTWORK_PACK_SUMS" | c="$(printf '%s' "$ARTWORK_REF" | cut -c1-12)" v="$ARTWORK_VARIANT" awk -F: \
 		'BEGIN { c = ENVIRON["c"]; v = ENVIRON["v"] } length(c) == 12 && $1 == c && $2 == v { print; f = 1; exit } END { exit !f }'); then
 		# the published pack of the pinned commit: downloaded, checked against
@@ -1158,7 +1202,7 @@ artwork_pack() { # artwork_pack <dir> — the verified pack of the variant, unpa
 		_want=$(printf '%s' "$_rel" | cut -d: -f4)
 		_u="$ARTWORK_RELEASES/pack-$_c/$_n-$_c-$ARTWORK_VARIANT.tar.xz"
 		fetch_https "$_u" "$_ap/in/pack.tar.xz" \
-			|| die "cannot download the pack of artwork-template $ARTWORK_REF ($ARTWORK_VARIANT): $_u"
+			|| die "cannot download the pack of artwork-template $ARTWORK_REF ($ARTWORK_VARIANT): $_u (check that its pack release has this variant, that ARTWORK_RELEASES is right, and that the host is reachable)"
 	else
 		# a checkout or a ref: its own scripts/pack.sh renders the pack
 		_src=$_ap/src
@@ -1318,6 +1362,7 @@ build_profile() { # build_profile <profile> <outdir>
 		log "    + write $_od/install.conf.redacted"
 		if [ "$_p" = desktop ]; then
 			log "    + write $_od/live$SITENUM.tgz (the live set: $(installer_source))"
+			log "    + artwork: $(artwork_source)"
 		fi
 		log "    + write $_od/SHA256"
 		return 0
