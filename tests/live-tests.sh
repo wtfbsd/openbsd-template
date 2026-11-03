@@ -1802,12 +1802,12 @@ if [ $? -ne 0 ] && grep -q "cannot download the pack of artwork-template 353ef29
 else
 	no 'the pack URL of the pin is release pack-<commit12>, <name>-<commit12>-<variant>.tar.xz'
 fi
-if grep -q '^INSTALLER_PIN=ceda104c69eb9aa21e9336244e7e76fd24ed3dec$' "$BUILD" \
+if grep -q '^INSTALLER_PIN=f2e9c48b051f473029ef44a78264b2239ff73141$' "$BUILD" \
 	&& grep -qx "INSTALLER_DIR=''" "$BUILD" && grep -qx "ARTWORK_DIR=''" "$BUILD" \
 	&& ! grep -Eq "^(INSTALLER|ARTWORK)_DIR=[^']|^(INSTALLER|ARTWORK)_DIR='[^']" "$BUILD"; then
-	ok 'build.sh pins installer-template ceda104 and names no INSTALLER_DIR or ARTWORK_DIR'
+	ok 'build.sh pins installer-template f2e9c48 and names no INSTALLER_DIR or ARTWORK_DIR'
 else
-	no 'build.sh pins installer-template ceda104 and names no INSTALLER_DIR or ARTWORK_DIR'
+	no 'build.sh pins installer-template f2e9c48 and names no INSTALLER_DIR or ARTWORK_DIR'
 fi
 
 # the live image brands its greeter too; every session gets the wallpaper
@@ -1932,4 +1932,65 @@ if [ $? -ne 0 ] && grep -q 'ARTWORK_SHA256 does not go with ARTWORK_REF=none' "$
 	ok 'ARTWORK_SHA256 with ARTWORK_REF=none is refused (the template branding is not a pack)'
 else
 	no 'ARTWORK_SHA256 with ARTWORK_REF=none is refused (the template branding is not a pack)' "$(cat "$work/pk-shanone.log")"
+fi
+
+# --- the live medium: /var/run/wtfbsd-live-medium (installer-template) --------
+_lm=$work/livemedium
+rm -rf "$_lm"
+mkdir -p "$_lm/bin" "$_lm/run"
+set_file "$LIVE" "usr/local/libexec/$SLUG/live-medium" > "$_lm/live-medium.sh"
+# lmrun <mount line of /> [hw.disknames] — the script with stubs of mount(8)
+# and sysctl(8); prints its status
+lmrun() {
+	printf '#!/bin/sh\nprintf "%%s\\n" "%s"\nprintf "/dev/sd9a on /x type ffs (local)\\n"\n' "$1" > "$_lm/bin/mount"
+	printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "${2:-sd0:0123456789abcdef,sd1:fedcba9876543210}" > "$_lm/bin/sysctl"
+	chmod 0755 "$_lm/bin/mount" "$_lm/bin/sysctl"
+	PATH="$_lm/bin:$PATH" LIVE_MEDIUM_FILE="$_lm/run/wtfbsd-live-medium" sh "$_lm/live-medium.sh" > /dev/null 2>&1
+	echo $?
+}
+_r=$(lmrun '/dev/sd0a on / type ffs (local)')
+if [ "$_r" = 0 ] && [ "$(cat "$_lm/run/wtfbsd-live-medium")" = /dev/sd0 ] \
+	&& [ "$(ls -l "$_lm/run/wtfbsd-live-medium" | cut -c1-10)" = '-rw-r--r--' ]; then
+	ok 'the live image names its medium: the disk of / in /var/run/wtfbsd-live-medium, one line, mode 0644'
+else
+	no "the live image names its medium (status $_r)"
+fi
+_r=$(lmrun 'fedcba9876543210.a on / type ffs (local)')
+if [ "$_r" = 0 ] && [ "$(cat "$_lm/run/wtfbsd-live-medium")" = /dev/sd1 ]; then
+	ok 'a root mounted by its DUID is followed to its disk through hw.disknames'
+else
+	no "a root mounted by its DUID is followed to its disk through hw.disknames (status $_r)"
+fi
+rm -f "$_lm/run/wtfbsd-live-medium"
+_r=$(lmrun '00000000000000aa.a on / type ffs (local)')
+if [ "$_r" != 0 ] && [ ! -e "$_lm/run/wtfbsd-live-medium" ]; then
+	ok 'a DUID that hw.disknames does not list writes no medium'
+else
+	no 'a DUID that hw.disknames does not list writes no medium'
+fi
+_r=$(lmrun 'tmpfs on / type tmpfs (local)')
+if [ "$_r" != 0 ] && [ ! -e "$_lm/run/wtfbsd-live-medium" ]; then
+	ok 'a root that is not the partition of a disk writes no medium (the installer then refuses, with LIVE_MEDIUM_REQUIRED)'
+else
+	no 'a root that is not the partition of a disk writes no medium'
+fi
+printf 'precious\n' > "$_lm/target"
+ln -s "$_lm/target" "$_lm/run/wtfbsd-live-medium"
+_r=$(lmrun '/dev/sd0a on / type ffs (local)')
+if [ "$_r" = 0 ] && [ ! -L "$_lm/run/wtfbsd-live-medium" ] && [ "$(cat "$_lm/target")" = precious ] \
+	&& [ "$(cat "$_lm/run/wtfbsd-live-medium")" = /dev/sd0 ]; then
+	ok 'a link planted at /var/run/wtfbsd-live-medium is replaced, never followed'
+else
+	no 'a link planted at /var/run/wtfbsd-live-medium is replaced, never followed'
+fi
+if set_file "$LIVE" "etc/rc.d/${SLUG}_live" | awk '/^rc_pre\(\)/ { f = 1; next } f && /libexec/ { print; exit }' \
+	| grep -q "/usr/local/libexec/$SLUG/live-medium"; then
+	ok 'rc.d/<slug>_live names the live medium first, before the X session'
+else
+	no 'rc.d/<slug>_live names the live medium first, before the X session'
+fi
+if set_file "$_it" usr/local/libexec/wtfbsd-installer/installer.conf | grep -qx "LIVE_MEDIUM_REQUIRED=$(sed -n 's/^LIVE_MEDIUM_REQUIRED=//p' "$BUILD")"; then
+	ok 'the installer.conf of the live set carries LIVE_MEDIUM_REQUIRED of build.sh'
+else
+	no 'the installer.conf of the live set carries LIVE_MEDIUM_REQUIRED of build.sh'
 fi

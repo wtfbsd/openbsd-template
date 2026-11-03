@@ -139,7 +139,11 @@ ARTWORK_SHA256=''
 # The pinned commits of the installer-template and the artwork template:
 # used when product.conf names neither a ref nor a directory ("none" turns
 # either off: the stand-in installer, the branding this template ships).
-INSTALLER_PIN=ceda104c69eb9aa21e9336244e7e76fd24ed3dec
+INSTALLER_PIN=f2e9c48b051f473029ef44a78264b2239ff73141
+# The live image names its medium in /var/run/wtfbsd-live-medium
+# (libexec/<slug>/live-medium, from rc.d/<slug>_live); with yes the
+# installer offers no disk when a memory root does not name its medium.
+LIVE_MEDIUM_REQUIRED=no
 ARTWORK_PIN=353ef29aa000eda6c1f274774170a7a691768490
 # The pre-rendered packs published for the pinned artwork commit (release
 # pack-<commit12> of the artwork template): <commit12>:<variant>:<name>:<sha256>.
@@ -1107,6 +1111,7 @@ build_live() { # build_live <outdir> — the live set of the desktop
 			printf 'OS=openbsd\n'
 			printf 'DEFAULT_KEYMAP=us\n'
 			printf 'DEFAULT_TZ=UTC\n'
+			printf 'LIVE_MEDIUM_REQUIRED=%s\n' "$LIVE_MEDIUM_REQUIRED"
 		} > "$_ic"
 		# Without root the installer-template writes the owners into a
 		# metalog instead; the live set is archived with the owner 0:0

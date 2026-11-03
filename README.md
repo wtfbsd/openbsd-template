@@ -677,8 +677,15 @@ packages own the files under `/etc/xdg`). The motd is the product's own
 OpenBSD supports that is in neither list fails the build.
 
 The installer-template is pinned the same way (`INSTALLER_PIN`, commit
-ceda104); `INSTALLER_DIR` or another `INSTALLER_REF` overrides it and
+f2e9c48); `INSTALLER_DIR` or another `INSTALLER_REF` overrides it and
 `INSTALLER_REF=none` gives the stand-in text installer.
+
+The live image names the disk it runs from in
+`/var/run/wtfbsd-live-medium` (one line, `/dev/sd0`; root's, mode 0644),
+written by `libexec/<slug>/live-medium` first thing in
+`rc.d/<slug>_live`, before the X session: the installer never offers that
+disk. `LIVE_MEDIUM_REQUIRED` in `build.sh` goes into the installer's
+configuration (`yes`: a memory root that names no medium gets no disk).
 
 The product.conf of wtfbsd/agents carries six keys for the live media:
 `INSTALLER_REF`, `INSTALLER_URL`, `PRODUCT_VERSION`, `ARTWORK_VARIANT`,

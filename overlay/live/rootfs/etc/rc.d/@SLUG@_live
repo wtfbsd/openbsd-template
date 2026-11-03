@@ -21,6 +21,10 @@ rc_reload=NO
 # the greeter of xenodm(1) on the live image carries the branding of the
 # product too (once; a second run changes nothing)
 rc_pre() {
+	# first: the installer must know the disk this live system runs from
+	[ ! -x /usr/local/libexec/@SLUG@/live-medium ] \
+		|| /usr/local/libexec/@SLUG@/live-medium \
+		|| echo '@SLUG@_live: could not name the live medium' >&2
 	[ ! -x /usr/local/libexec/@SLUG@/brand-xenodm ] \
 		|| /usr/local/libexec/@SLUG@/brand-xenodm / \
 		|| echo '@SLUG@_live: could not brand the greeter of xenodm' >&2
