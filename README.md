@@ -659,7 +659,7 @@ wallpaper (`backgrounds/wallpaper.png` from the pack, or the
 sets it on each connected output (`desktop-defaults`).
 
 The artwork comes from the artwork template, pinned in `build.sh`
-(`ARTWORK_PIN`, commit 353ef29): its pre-rendered pack for the variant
+(`ARTWORK_PIN`, commit 5aaea01): its pre-rendered pack for the variant
 (release `pack-<commit12>`, `<name>-<commit12>-<variant>.tar.xz`) is
 downloaded and checked against the sha256 pinned beside it, so the build
 host needs only ImageMagick (the pack's `identity-stamp.sh` stamps the
@@ -677,12 +677,20 @@ default entry of `/etc/gettytab`, by `brand-getty`; OpenBSD has no
 `/etc/issue`) and the Xfce theme (panel, settings, an xfwm4 theme of the
 Default theme's images in the pack's colours, GTK colours; given to the
 first session of an account by `desktop-defaults`, because the xfce
-packages own the files under `/etc/xdg`). The motd is the product's own
+packages own the files under `/etc/xdg`). The pack's wallpaper helper is
+installed too: the autostart entry `/etc/xdg/autostart/<slug>-wallpaper.desktop`
+(mode 0644) and the script it runs,
+`/usr/local/share/<slug>/xfce/session/<slug>-wallpaper.sh` (mode 0755),
+root-owned, in the site set and in the live set; the paths are fixed, so
+the `Exec=` line of the entry always names the script that is installed. A
+pack of an artwork template that ships no helper at all builds without one
+(the build log says so); a pack that ships half of it, or a helper file
+that is a link, is refused. The motd is the product's own
 (`MOTD`); the installer spots belong to installer-template. A spot
 OpenBSD supports that is in neither list fails the build.
 
 The installer-template is pinned the same way (`INSTALLER_PIN`, commit
-f2e9c48); `INSTALLER_DIR` or another `INSTALLER_REF` overrides it and
+49bc24d); `INSTALLER_DIR` or another `INSTALLER_REF` overrides it and
 `INSTALLER_REF=none` gives the stand-in text installer.
 
 The live image names the disk it runs from in
