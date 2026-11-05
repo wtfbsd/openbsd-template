@@ -136,21 +136,25 @@ ARTWORK_PACK_SHA256=''
 # the sha256 of the artwork pack of ARTWORK_REF (wtfbsd/agents product.conf):
 # empty means the sum pinned below for the template's own pack
 ARTWORK_SHA256=''
+# The root of the unpacked artwork pack of the build (the directory the
+# pack holds): the wallpaper helper of the session is installed in the
+# site set and in the live set from it.
+ARTWORK_PACK_ROOT=''
 # The pinned commits of the installer-template and the artwork template:
 # used when product.conf names neither a ref nor a directory ("none" turns
 # either off: the stand-in installer, the branding this template ships).
-INSTALLER_PIN=f2e9c48b051f473029ef44a78264b2239ff73141
+INSTALLER_PIN=49bc24d10748c4853de98e02ea2240071bda8803
 # The live image names its medium in /var/run/wtfbsd-live-medium
 # (libexec/<slug>/live-medium, from rc.d/<slug>_live); with yes the
 # installer offers no disk when a memory root does not name its medium.
 LIVE_MEDIUM_REQUIRED=yes
-ARTWORK_PIN=353ef29aa000eda6c1f274774170a7a691768490
+ARTWORK_PIN=5aaea01b082938f3c6816cd5b881699e62d3d9dd
 # The pre-rendered packs published for the pinned artwork commit (release
 # pack-<commit12> of the artwork template): <commit12>:<variant>:<name>:<sha256>.
 # A ref with a pack here is downloaded and checked, not rendered.
 ARTWORK_RELEASES=''
-ARTWORK_PACK_SUMS='353ef29aa000:default:examplebsd:10f2507cd0bb325534157f073d79bc08da6a5e1ded34686ebe683a75a0a1d3e4
-353ef29aa000:cyberpunk:examplebsd:9e53a16fa3676daa9da8fa888fdfde9a7ac80b44bcf57ddac391e9f438bdcbd6'
+ARTWORK_PACK_SUMS='5aaea01b0829:default:examplebsd:f0753807e81daacc3dc7b24995d49e74b1fd61152035115b37888fe814176a12
+5aaea01b0829:cyberpunk:examplebsd:3c0d23914d8282a0eed89eacb66e80b8b7dada84492d52cc2415e85621d4f470'
 ARTWORK_VARIANT=''
 PRODUCT_VERSION=''
 while IFS= read -r _line || [ -n "$_line" ]; do
@@ -1137,7 +1141,20 @@ build_live() { # build_live <outdir> — the live set of the desktop
 	done < "$_lx"
 	chmod 0755 "$_ls/usr/local/bin/wtfbsd-installer"
 	chmod 0600 "$_ls/etc/doas.conf"
+	# the wallpaper helper of the artwork pack: the live session gets the
+	# same autostart entry and the same script as the installed system
+	# (the modes of the two files are set by install_wallpaper)
+	if [ -n "$ARTWORK_PACK_ROOT" ]; then
+		install_wallpaper "$_ls" "$ARTWORK_PACK_ROOT"
+	elif [ -n "$ARTWORK_PACK$ARTWORK_DIR$ARTWORK_REF" ]; then
+		# the live set is the set of the desktop profile, and the
+		# artwork of the build is pinned: the live session has a
+		# wallpaper helper. A live set without one is a silent failure.
+		die 'the live set has no wallpaper helper: the pack of the artwork of the build is not there'
+	fi
 	rm -f "$_lx" "$OUT/.stage/live.before"
+	rmrf "$OUT/.stage/artwork" "$OUT/.stage"
+	ARTWORK_PACK_ROOT=''
 	if [ "$(id -u)" = 0 ]; then
 		chown -R 0:0 "$_ls"
 	fi
@@ -1249,6 +1266,89 @@ SPOT_COLS='spot openbsd rendered'
 SPOTS_HERE='xenodm-logo xenodm-colours xenodm-background wallpapers icon-distributor icon-menu icon-installer identity-file identity-line login-issue xfce-theme'
 SPOTS_ELSEWHERE='motd installer-header installer-sidebar installer-palette installer-slides installer-name'
 
+# slug_replace <from> <to> <in> <out> — copy <in> to <out>, with every
+# literal occurrence of <from> replaced by <to>. The two are strings, not
+# regular expressions: the name of a pack is data, and a regular expression
+# built from data is a way to fail in a new way.
+slug_replace() { # slug_replace <from> <to> <in> <out>
+	[ -n "${1:-}" ] || die 'slug_replace: the string to replace is empty'
+	awk -v a="$1" -v b="$2" '
+		function rep(s,   i, out) {
+			out = ""
+			while ((i = index(s, a)) > 0) {
+				out = out substr(s, 1, i - 1) b
+				s = substr(s, i + length(a))
+			}
+			return out s
+		}
+		{ print rep($0) }
+	' "$3" > "$4" || die "cannot write $4"
+}
+
+# The wallpaper helper of the artwork template: an autostart entry for the
+# Xfce session and the script it runs. The paths are fixed: the entry is
+# /etc/xdg/autostart/<slug>-wallpaper.desktop (mode 0644) and the script is
+# /usr/local/share/<slug>/xfce/session/<slug>-wallpaper.sh (mode 0755). The
+# Exec= line of the entry is written here, so it always names the script
+# that is installed, whatever the slug of the pack is.
+#
+# install_wallpaper <stage> <pack-root> — the pack holds exactly two files
+# for the helper: out/xfce/autostart/<packslug>-wallpaper.desktop and
+# out/xfce/session/<packslug>-wallpaper.sh, where <packslug> is the name=
+# of the pack's PACK file. The other lines of the entry are the pack's, with
+# the slug of the pack replaced by the slug of the product.
+install_wallpaper() { # install_wallpaper <stage> <pack-root>
+	_sw=$1
+	_sp=$2
+	_sl=$DISTRO_SLUG
+	[ -n "$_sp" ] || die 'the wallpaper helper: no artwork pack'
+	[ -f "$_sp/PACK" ] || die "the artwork pack has no PACK file ($_sp)"
+	_ps=$(sed -n 's/^name=//p' "$_sp/PACK" | head -n 1)
+	chk '^[a-z0-9][a-z0-9-]*$' "$_ps" 'the name of the artwork pack is not a slug'
+	_sd="$_sp/out/xfce/autostart/$_ps-wallpaper.desktop"
+	_ss="$_sp/out/xfce/session/$_ps-wallpaper.sh"
+	_hd=no
+	if [ -e "$_sd" ] || [ -L "$_sd" ]; then _hd=yes; fi
+	_hs=no
+	if [ -e "$_ss" ] || [ -L "$_ss" ]; then _hs=yes; fi
+	if [ "$_hd" = no ] && [ "$_hs" = no ]; then
+		# a pack of an artwork template that ships no helper: the
+		# wallpaper is the one this template sets itself
+		log '    + the pack holds no wallpaper helper'
+		return 0
+	fi
+	[ "$_hd" = yes ] || die 'the artwork pack holds the session helper of the wallpaper but no autostart entry'
+	[ "$_hs" = yes ] || die 'the artwork pack holds the autostart entry of the wallpaper but no session helper'
+	# a link in the pack is a way to name a file outside the pack: the
+	# helper is refused, not followed
+	[ ! -L "$_sd" ] || die "the autostart entry of the wallpaper of the pack is a link ($_sd)"
+	[ ! -L "$_ss" ] || die "the session helper of the wallpaper of the pack is a link ($_ss)"
+	_ddst="$_sw/etc/xdg/autostart/$_sl-wallpaper.desktop"
+	_sdst="$_sw/usr/local/share/$_sl/xfce/session/$_sl-wallpaper.sh"
+	mkdir -p "$_sw/etc/xdg/autostart" "$_sw/usr/local/share/$_sl/xfce/session" \
+		|| die 'cannot create the directories of the wallpaper helper'
+	chmod 0755 "$_sw/etc/xdg/autostart" "$_sw/usr/local/share/$_sl/xfce/session" \
+		|| die 'cannot set the mode of the directories of the wallpaper helper'
+	# the entry: the lines of the pack, with the slug of the pack
+	# replaced by the slug of the product
+	slug_replace "$_ps" "$_sl" "$_sd" "$_ddst"
+	# the Exec= line is ours: it names the script that is installed
+	_exec="Exec=/bin/sh \"/usr/local/share/$_sl/xfce/session/$_sl-wallpaper.sh\""
+	awk -v e="$_exec" '
+		/^Exec=/ { if (!done) { print e; done = 1 } next }
+		{ print }
+		END { if (!done) print e }
+	' "$_ddst" > "$_ddst.new" || die 'cannot write the autostart entry of the wallpaper'
+	mv "$_ddst.new" "$_ddst" || die 'cannot write the autostart entry of the wallpaper'
+	# the script: the script of the pack, with the slug of the pack
+	# replaced by the slug of the product (it names the share directory
+	# of the product)
+	slug_replace "$_ps" "$_sl" "$_ss" "$_sdst"
+	chmod 0755 "$_sdst" || die 'cannot set the mode of the session helper of the wallpaper'
+	chmod 0644 "$_ddst" || die 'cannot set the mode of the autostart entry of the wallpaper'
+	log "    + the wallpaper helper of the pack (etc/xdg/autostart/$_sl-wallpaper.desktop, usr/local/share/$_sl/xfce/session/$_sl-wallpaper.sh)"
+}
+
 install_artwork() { # install_artwork <stage> — the OpenBSD spots of the variant
 	_st=$1
 	_pr=$(artwork_pack "$OUT/.stage/artwork") || exit 1
@@ -1341,7 +1441,10 @@ install_artwork() { # install_artwork <stage> — the OpenBSD spots of the varia
 		done
 	done
 	rm -f "$OUT/.stage/spots.list"
-	rmrf "$OUT/.stage/artwork" "$OUT/.stage"
+	# the wallpaper helper of the session is installed from the pack: the
+	# pack is kept for the live set (install_wallpaper runs after the
+	# mode pass of the stage)
+	ARTWORK_PACK_ROOT=$_pr
 }
 
 # The site set holds: the base overlay, the profile overlay, the merged
@@ -1462,6 +1565,12 @@ build_profile() { # build_profile <profile> <outdir>
 	# doas(1) are a list of the things an account may do.
 	if [ -f "$_stage/etc/doas.conf" ]; then
 		chmod 0600 "$_stage/etc/doas.conf"
+	fi
+	# the wallpaper helper of the artwork pack: the autostart entry and
+	# the script it runs (after the mode pass, so the modes of the two
+	# files are the ones install_wallpaper sets)
+	if [ "$_p" = desktop ] && [ -n "$ARTWORK_PACK_ROOT" ]; then
+		install_wallpaper "$_stage" "$ARTWORK_PACK_ROOT"
 	fi
 
 	# --- owner 0:0 ---------------------------------------------------------

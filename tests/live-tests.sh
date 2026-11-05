@@ -25,6 +25,20 @@ set_file() {
 has_member() {
 	tar -tzf "$1" 2> /dev/null | grep -qx -- "$2"
 }
+# mode_0755 <tgz> <name> — true when the member has the mode 0755
+mode_0755() {
+	case $(member_line "$1" "$2") in
+		-rwxr-xr-x*) return 0 ;;
+	esac
+	return 1
+}
+# mode_0644 <tgz> <name> — true when the member has the mode 0644
+mode_0644() {
+	case $(member_line "$1" "$2") in
+		-rw-r--r--*) return 0 ;;
+	esac
+	return 1
+}
 
 mkconf live-desktop -e "s/^PROFILE=.*/PROFILE='desktop'/"
 LCONF=$work/live-desktop.conf
@@ -1575,13 +1589,18 @@ mkpack() {
 		"$_pd/out/icons/hicolor/scalable/apps"
 	printf 'name=examplebsd\ncommit=0123456789ab\nvariant=cyberpunk\n' > "$_pd/PACK"
 	printf 'NAME="ExampleBSD"\nNAME_LOWER="examplebsd"\n' > "$_pd/palette.env"
-	mkdir -p "$_pd/out/console" "$_pd/out/xfce/xfconf"
+	mkdir -p "$_pd/out/console" "$_pd/out/xfce/xfconf" "$_pd/out/xfce/autostart" "$_pd/out/xfce/session"
 	printf '# banner\n\t:im=\\r\\nExampleBSD (%%h) (%%t)\\r\\n\\r\\n:\n' > "$_pd/out/console/gettytab.fragment"
 	printf '\nExampleBSD - Your BSD, your way\n\n' > "$_pd/out/console/issue"
 	printf '<channel name="xfce4-panel"><property name="button-icon" type="string" value="examplebsd-menu"/><property name="button-title" type="string" value="ExampleBSD"/></channel>\n' > "$_pd/out/xfce/xfconf/xfce4-panel.xml"
 	printf '<channel name="xsettings"/>\n' > "$_pd/out/xfce/xfconf/xsettings.xml"
 	printf 'active_color_1=#2F6FDE\n' > "$_pd/out/xfce/xfwm4-themerc"
 	printf '@define-color theme_bg_color #F4F6FB;\n' > "$_pd/out/xfce/gtk-colors.css"
+	# the wallpaper helper of the session: the autostart entry and the
+	# script its Exec= line names (the share directory of the pack)
+	printf '[Desktop Entry]\nType=Application\nName=ExampleBSD wallpaper\nExec=/bin/sh "/usr/local/share/examplebsd/xfce/session/examplebsd-wallpaper.sh"\nOnlyShowIn=XFCE;\nNoDisplay=true\n' \
+		> "$_pd/out/xfce/autostart/examplebsd-wallpaper.desktop"
+	printf '#!/bin/sh\n# the wallpaper helper of the pack\nexit 0\n' > "$_pd/out/xfce/session/examplebsd-wallpaper.sh"
 	{
 		printf '%s\n' "${2:-spot	what	shows	freebsd	netbsd	openbsd	dragonfly	illumos	size_format	source	rendered	notes}"
 		printf 'motd\tm\tconsole\t/etc/motd\t/etc/motd\t/etc/motd\tx\tx\ttext\tconsole/motd.template\tconsole/motd.template\t\n'
@@ -1656,6 +1675,42 @@ if [ "$(set_file "$_PS" "$_d/backgrounds/wallpaper.png")" = "$(printf 'wallpaper
 	ok "the wallpaper and the greeter background are stamped with the identity by the pack's identity-stamp.sh"
 else
 	no "the wallpaper and the greeter background are stamped with the identity by the pack's identity-stamp.sh"
+fi
+# the wallpaper helper of the pack: the autostart entry of the session and
+# the script its Exec= line names (in the site set and in the live set)
+_wp=$work/out-id-pack/live80.tgz
+_exec="Exec=/bin/sh \"/usr/local/share/$SLUG/xfce/session/$SLUG-wallpaper.sh\""
+if set_file "$_PS" "etc/xdg/autostart/$SLUG-wallpaper.desktop" | grep -qx "$_exec" \
+	&& set_file "$_PS" "usr/local/share/$SLUG/xfce/session/$SLUG-wallpaper.sh" | grep -q 'the wallpaper helper of the pack' \
+	&& mode_0644 "$_PS" "etc/xdg/autostart/$SLUG-wallpaper.desktop" \
+	&& mode_0755 "$_PS" "usr/local/share/$SLUG/xfce/session/$SLUG-wallpaper.sh" \
+	&& set_file "$_wp" "etc/xdg/autostart/$SLUG-wallpaper.desktop" | grep -qx "$_exec" \
+	&& set_file "$_wp" "usr/local/share/$SLUG/xfce/session/$SLUG-wallpaper.sh" | grep -q 'the wallpaper helper of the pack' \
+	&& mode_0644 "$_wp" "etc/xdg/autostart/$SLUG-wallpaper.desktop" \
+	&& mode_0755 "$_wp" "usr/local/share/$SLUG/xfce/session/$SLUG-wallpaper.sh"; then
+	ok 'the wallpaper helper of the pack is installed: the autostart entry in /etc/xdg/autostart (mode 0644) and the script its Exec= names (mode 0755), in the site set and in the live set'
+else
+	no 'the wallpaper helper of the pack is installed: the autostart entry in /etc/xdg/autostart (mode 0644) and the script its Exec= names (mode 0755), in the site set and in the live set'
+fi
+# A product whose slug is not the slug of the pack: the paths of the
+# wallpaper helper are fixed, so the Exec= line of the autostart entry
+# names the script that is installed (the file names of the pack are never
+# used).
+idbuild slug -e "s/^DISTRO_SLUG=.*/DISTRO_SLUG='acmeos'/" -e "s/^DISTRO_NAME=.*/DISTRO_NAME='AcmeOS'/"
+packconf slug "$work/good.tar.xz" "$_psum"
+idbuild2 slug
+_rc=$?
+_sg=$work/out-id-slug/site80.tgz
+_de=etc/xdg/autostart/acmeos-wallpaper.desktop
+_dc=usr/local/share/acmeos/xfce/session/acmeos-wallpaper.sh
+_xp=$(set_file "$_sg" "$_de" 2> /dev/null | sed -n 's/^Exec=.*"\(\/[^"]*\)".*$/\1/p' | head -n 1)
+if [ "$_rc" -eq 0 ] \
+	&& has_member "$_sg" "$_de" \
+	&& has_member "$_sg" "$_dc" \
+	&& [ "$_xp" = "/$_dc" ]; then
+	ok 'the autostart entry of the wallpaper helper names the script that is installed when the slug of the product differs from the slug of the pack'
+else
+	no "the autostart entry of the wallpaper helper names the script that is installed when the slug of the product differs from the slug of the pack (status $_rc; the Exec= line names ${_xp:-nothing}; the script installed is /$_dc; the session helper of the site set: $(tar -tzf "$_sg" 2> /dev/null | grep 'xfce/session/.*wallpaper' | tr '\n' ' '))"
 fi
 # the xenodm of the installed system with the pack: OpenBSD's files replaced
 _px=$work/packx
@@ -1779,6 +1834,72 @@ if [ $? -ne 0 ] && grep -q 'the artwork pack lacks dm/pixmaps/examplebsd-8bpp.xp
 else
 	no 'the build fails when the artwork pack lacks a rendered file of a spot it installs'
 fi
+# a pack of an artwork template that ships no wallpaper helper: the build
+# goes on without one, and the log says so
+mkpack nowall
+rm "$work/pack-nowall/examplebsd-0123456789ab-cyberpunk/out/xfce/autostart/examplebsd-wallpaper.desktop"
+rm "$work/pack-nowall/examplebsd-0123456789ab-cyberpunk/out/xfce/session/examplebsd-wallpaper.sh"
+( cd "$work/pack-nowall" && tar -cf - examplebsd-0123456789ab-cyberpunk | xz -c > "$work/nowall.tar.xz" )
+mkconf id-packnow -e "s/^PROFILE=.*/PROFILE='desktop'/"
+packconf packnow "$work/nowall.tar.xz" "$(sha256sum "$work/nowall.tar.xz" | cut -d ' ' -f 1)"
+idbuild2 packnow
+if [ $? -eq 0 ] \
+	&& ! has_member "$work/out-id-packnow/site80.tgz" "etc/xdg/autostart/$SLUG-wallpaper.desktop" \
+	&& grep -q 'the pack holds no wallpaper helper' "$work/id-packnow.log"; then
+	ok 'a pack that ships no wallpaper helper builds without one, and the log says so'
+else
+	no 'a pack that ships no wallpaper helper builds without one, and the log says so (see $work/id-packnow.log)'
+fi
+# a pack that ships half of the helper is refused: the entry would run a
+# script that is not there
+mkpack halfwall
+rm "$work/pack-halfwall/examplebsd-0123456789ab-cyberpunk/out/xfce/session/examplebsd-wallpaper.sh"
+( cd "$work/pack-halfwall" && tar -cf - examplebsd-0123456789ab-cyberpunk | xz -c > "$work/halfwall.tar.xz" )
+mkconf id-packhalf -e "s/^PROFILE=.*/PROFILE='desktop'/"
+packconf packhalf "$work/halfwall.tar.xz" "$(sha256sum "$work/halfwall.tar.xz" | cut -d ' ' -f 1)"
+idbuild2 packhalf
+if [ $? -ne 0 ] \
+	&& grep -q 'the artwork pack holds the autostart entry of the wallpaper but no session helper' "$work/id-packhalf.log"; then
+	ok 'a pack that ships the autostart entry of the wallpaper but no session helper is refused'
+else
+	no 'a pack that ships the autostart entry of the wallpaper but no session helper is refused (see $work/id-packhalf.log)'
+fi
+# a pack whose helper file is a link is refused: a link names a file
+# outside the pack, and the content of that file would be shipped
+mkpack symwall
+rm "$work/pack-symwall/examplebsd-0123456789ab-cyberpunk/out/xfce/autostart/examplebsd-wallpaper.desktop"
+ln -s /etc/passwd "$work/pack-symwall/examplebsd-0123456789ab-cyberpunk/out/xfce/autostart/examplebsd-wallpaper.desktop"
+( cd "$work/pack-symwall" && tar -cf - examplebsd-0123456789ab-cyberpunk | xz -c > "$work/symwall.tar.xz" )
+mkconf id-packsym -e "s/^PROFILE=.*/PROFILE='desktop'/"
+packconf packsym "$work/symwall.tar.xz" "$(sha256sum "$work/symwall.tar.xz" | cut -d ' ' -f 1)"
+idbuild2 packsym
+if [ $? -ne 0 ] \
+	&& grep -q 'the autostart entry of the wallpaper of the pack is a link' "$work/id-packsym.log"; then
+	ok 'a pack whose autostart entry of the wallpaper is a link is refused'
+else
+	no 'a pack whose autostart entry of the wallpaper is a link is refused (see $work/id-packsym.log)'
+fi
+# a pack that names itself with something that is not a slug is refused:
+# the name of the pack names the files of the helper
+mkpack badslug
+( cd "$work/pack-badslug/examplebsd-0123456789ab-cyberpunk" \
+	&& find . -name '*examplebsd*' | while IFS= read -r _f; do
+		_d=$(dirname -- "$_f")
+		_b=$(basename -- "$_f" | sed 's/examplebsd/example.bsd/g')
+		mv -- "$_f" "$_d/$_b"
+	done )
+printf 'name=example.bsd\ncommit=0123456789ab\nvariant=cyberpunk\n' \
+	> "$work/pack-badslug/examplebsd-0123456789ab-cyberpunk/PACK"
+( cd "$work/pack-badslug" && tar -cf - examplebsd-0123456789ab-cyberpunk | xz -c > "$work/badslug.tar.xz" )
+mkconf id-packbad -e "s/^PROFILE=.*/PROFILE='desktop'/"
+packconf packbad "$work/badslug.tar.xz" "$(sha256sum "$work/badslug.tar.xz" | cut -d ' ' -f 1)"
+idbuild2 packbad
+if [ $? -ne 0 ] \
+	&& grep -q 'the name of the artwork pack is not a slug' "$work/id-packbad.log"; then
+	ok 'a pack that names itself with something that is not a slug is refused'
+else
+	no 'a pack that names itself with something that is not a slug is refused (see $work/id-packbad.log)'
+fi
 
 # the pins: without a ref or a directory the build takes the pinned commits
 mkconf id-pinart -e "s/^PROFILE=.*/PROFILE='desktop'/"
@@ -1786,28 +1907,28 @@ grep -v '^ARTWORK_REF=' "$work/id-pinart.conf" > "$work/id-pinart.conf.n" && mv 
 # the published pack of the pin, from a fixture release directory: right
 # sum accepted, any other pack refused
 _rel=$work/releases
-mkdir -p "$_rel/pack-353ef29aa000"
-cp "$work/good.tar.xz" "$_rel/pack-353ef29aa000/examplebsd-353ef29aa000-default.tar.xz"
+mkdir -p "$_rel/pack-5aaea01b0829"
+cp "$work/good.tar.xz" "$_rel/pack-5aaea01b0829/examplebsd-5aaea01b0829-default.tar.xz"
 printf "ARTWORK_RELEASES='file://%s'\n" "$_rel" >> "$work/id-pinart.conf"
 idbuild2 pinart
-if [ $? -ne 0 ] && grep -q 'the artwork pack does not match its sha256 (10f2507cd0bb325534157f073d79bc08da6a5e1ded34686ebe683a75a0a1d3e4)' "$work/id-pinart.log"; then
-	ok 'without ARTWORK_REF, ARTWORK_DIR or ARTWORK_PACK the build fetches the published pack of the pin (353ef29) and refuses one that does not match the pinned sha256'
+if [ $? -ne 0 ] && grep -q 'the artwork pack does not match its sha256 (f0753807e81daacc3dc7b24995d49e74b1fd61152035115b37888fe814176a12)' "$work/id-pinart.log"; then
+	ok 'without ARTWORK_REF, ARTWORK_DIR or ARTWORK_PACK the build fetches the published pack of the pin (5aaea01) and refuses one that does not match the pinned sha256'
 else
-	no 'without ARTWORK_REF, ARTWORK_DIR or ARTWORK_PACK the build fetches the published pack of the pin (353ef29) and refuses one that does not match the pinned sha256'
+	no 'without ARTWORK_REF, ARTWORK_DIR or ARTWORK_PACK the build fetches the published pack of the pin (5aaea01) and refuses one that does not match the pinned sha256'
 fi
-rm -f "$_rel/pack-353ef29aa000/examplebsd-353ef29aa000-default.tar.xz"
+rm -f "$_rel/pack-5aaea01b0829/examplebsd-5aaea01b0829-default.tar.xz"
 idbuild2 pinart
-if [ $? -ne 0 ] && grep -q "cannot download the pack of artwork-template 353ef29aa000eda6c1f274774170a7a691768490 (default): file://$_rel/pack-353ef29aa000/examplebsd-353ef29aa000-default.tar.xz" "$work/id-pinart.log"; then
+if [ $? -ne 0 ] && grep -q "cannot download the pack of artwork-template 5aaea01b082938f3c6816cd5b881699e62d3d9dd (default): file://$_rel/pack-5aaea01b0829/examplebsd-5aaea01b0829-default.tar.xz" "$work/id-pinart.log"; then
 	ok 'the pack URL of the pin is release pack-<commit12>, <name>-<commit12>-<variant>.tar.xz'
 else
 	no 'the pack URL of the pin is release pack-<commit12>, <name>-<commit12>-<variant>.tar.xz'
 fi
-if grep -q '^INSTALLER_PIN=f2e9c48b051f473029ef44a78264b2239ff73141$' "$BUILD" \
+if grep -q '^INSTALLER_PIN=49bc24d10748c4853de98e02ea2240071bda8803$' "$BUILD" \
 	&& grep -qx "INSTALLER_DIR=''" "$BUILD" && grep -qx "ARTWORK_DIR=''" "$BUILD" \
 	&& ! grep -Eq "^(INSTALLER|ARTWORK)_DIR=[^']|^(INSTALLER|ARTWORK)_DIR='[^']" "$BUILD"; then
-	ok 'build.sh pins installer-template f2e9c48 and names no INSTALLER_DIR or ARTWORK_DIR'
+	ok 'build.sh pins installer-template 49bc24d and names no INSTALLER_DIR or ARTWORK_DIR'
 else
-	no 'build.sh pins installer-template f2e9c48 and names no INSTALLER_DIR or ARTWORK_DIR'
+	no 'build.sh pins installer-template 49bc24d and names no INSTALLER_DIR or ARTWORK_DIR'
 fi
 
 # the live image brands its greeter too; every session gets the wallpaper
