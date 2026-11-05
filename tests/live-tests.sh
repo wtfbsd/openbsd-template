@@ -1994,3 +1994,11 @@ if set_file "$_it" usr/local/libexec/wtfbsd-installer/installer.conf | grep -qx 
 else
 	no 'the installer.conf of the live set carries LIVE_MEDIUM_REQUIRED of build.sh'
 fi
+# the live boot capture passed (the marker named the disk it booted from),
+# so the installer refuses a memory root that names no medium
+if [ "$(sed -n 's/^LIVE_MEDIUM_REQUIRED=//p' "$BUILD")" = yes ] \
+	&& set_file "$_it" usr/local/libexec/wtfbsd-installer/installer.conf | grep -qx 'LIVE_MEDIUM_REQUIRED=yes'; then
+	ok 'the live set requires the live medium (LIVE_MEDIUM_REQUIRED=yes)'
+else
+	no 'the live set requires the live medium (LIVE_MEDIUM_REQUIRED=yes)'
+fi

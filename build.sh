@@ -143,7 +143,7 @@ INSTALLER_PIN=f2e9c48b051f473029ef44a78264b2239ff73141
 # The live image names its medium in /var/run/wtfbsd-live-medium
 # (libexec/<slug>/live-medium, from rc.d/<slug>_live); with yes the
 # installer offers no disk when a memory root does not name its medium.
-LIVE_MEDIUM_REQUIRED=no
+LIVE_MEDIUM_REQUIRED=yes
 ARTWORK_PIN=353ef29aa000eda6c1f274774170a7a691768490
 # The pre-rendered packs published for the pinned artwork commit (release
 # pack-<commit12> of the artwork template): <commit12>:<variant>:<name>:<sha256>.

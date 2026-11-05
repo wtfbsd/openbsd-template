@@ -22,9 +22,11 @@ License: BSD-2-Clause (see `LICENSE`).
 
 The live image of the desktop, ExampleBSD on **OpenBSD 8.0** (amd64), on a
 virtual machine (bhyve, UEFI, 1280x1024), driven with the keyboard alone (see
-[The pointer under bhyve](#the-pointer-under-bhyve)).
+[The pointer under bhyve](#the-pointer-under-bhyve)); the boot prompt took
+its commands on the serial console.
 
-The boot loader of OpenBSD 8.0 (it has no splash screen):
+The boot loader of OpenBSD 8.0 (it has no splash screen), stopped at its
+prompt:
 
 ![The OpenBSD 8.0 boot loader](docs/screenshots/boot.png)
 
@@ -41,10 +43,13 @@ and the menu entry open it again:
 The disk page: the disks OpenBSD detects (fdisk, disklabel, bioctl; the
 live disk is not listed), the layouts this template offers (single disk,
 softraid CRYPTO; RAID 1 and RAID 1C with two disks or more) and the plan
-before and after. Here the disks are used separately:
+before and after. Here the live image runs from the third disk, sd2: it
+wrote `/dev/sd2` into `/var/run/wtfbsd-live-medium` (see
+[The live image (desktop)](#the-live-image-desktop)) and the page lists
+sd0, sd1, sd3 and sd4 only. The disks are used separately:
 
-- sd1 holds the system.
-- sd2 is formatted as a drive on /data. /etc/fstab names it by its disk
+- sd0 holds the system.
+- sd1 is formatted as a drive on /data. /etc/fstab names it by its disk
   ID (DUID), so it still mounts when the disks come up in another order.
 - sd3 and sd4 are left as they are.
 
@@ -685,7 +690,11 @@ The live image names the disk it runs from in
 written by `libexec/<slug>/live-medium` first thing in
 `rc.d/<slug>_live`, before the X session: the installer never offers that
 disk. `LIVE_MEDIUM_REQUIRED` in `build.sh` goes into the installer's
-configuration (`yes`: a memory root that names no medium gets no disk).
+configuration; it is `yes` (a memory root that names no medium gets no
+disk). On a live boot from the third disk of the machine the file held
+`/dev/sd2`, the disk of `/` (`/dev/sd2a`), and the installer's disk list
+left sd2 out; a test file naming `/dev/sd4` given to the installer's
+disk listing (`INSTALLER_LIVE_MEDIUM_FILE`) left sd4 out as well.
 
 The product.conf of wtfbsd/agents carries six keys for the live media:
 `INSTALLER_REF`, `INSTALLER_URL`, `PRODUCT_VERSION`, `ARTWORK_VARIANT`,
