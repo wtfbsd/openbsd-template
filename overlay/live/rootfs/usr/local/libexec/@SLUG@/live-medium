@@ -1,0 +1,49 @@
+#!/bin/sh
+#
+# live-medium — name the device the live system was started from in
+# /var/run/wtfbsd-live-medium (the contract of installer-template: one line,
+# the device; a regular file of root, not writable by others). The installer
+# never offers that disk.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# Live image only, run as root by rc.d/@SLUG@_live before the X session
+# starts. The root of the live image is the FFS of the disk it booted from
+# (/dev/sd0a, or its DUID 0123456789abcdef.a): the medium is that disk.
+# /var/run is emptied at every boot, so the file is always this boot's.
+
+set -u
+out=${LIVE_MEDIUM_FILE:-/var/run/wtfbsd-live-medium}
+umask 022
+
+fail() { echo "live-medium: $*" >&2; exit 1; }
+
+# the device mounted on /
+root=$(mount | awk '$2 == "on" && $3 == "/" { print $1; exit }')
+[ -n "$root" ] || fail 'no file system is mounted on /'
+root=${root#/dev/}
+case $root in
+	[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[a-p])
+		# a DUID: the disk is the one hw.disknames lists with it
+		duid=${root%.?}
+		disk=$(sysctl -n hw.disknames 2> /dev/null | tr ',' '\n' \
+			| d="$duid" awk -F: 'BEGIN { d = ENVIRON["d"] } $2 == d { print $1; exit }')
+		[ -n "$disk" ] || fail "the DUID $duid of / is not in hw.disknames"
+		;;
+	[a-z]*[0-9][a-p])
+		disk=${root%?}
+		;;
+	*)
+		fail "/ is on $root: not the partition of a disk"
+		;;
+esac
+case $disk in
+	*[!a-z0-9]* | '') fail "not the name of a disk: $disk" ;;
+esac
+
+# written beside the file and moved over it: a link or anything else that
+# is there already is replaced, never followed
+dir=$(dirname -- "$out")
+tmp=$(mktemp "$dir/.wtfbsd-live-medium.XXXXXXXX") || fail "cannot create a file in $dir"
+printf '/dev/%s\n' "$disk" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$out" \
+	|| { rm -f "$tmp"; fail "cannot write $out"; }
