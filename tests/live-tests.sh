@@ -1010,12 +1010,78 @@ fi
 
 _cat=$work/lic.json
 set_file "$LIVE" "usr/local/share/$SLUG/licensed-software.json" > "$_cat"
-if python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["os"] == "openbsd" and c["items"] == [] and c["product"] == "ExampleBSD"' "$_cat" 2> /dev/null; then
+if python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["items"] == []' "$_cat" 2> /dev/null; then
 	ok 'the live image ships licensed-software.json: OpenBSD has nothing that needs a licence acceptance'
 else
 	no 'the live image ships licensed-software.json: OpenBSD has nothing that needs a licence acceptance'
 fi
+# The installer reads the catalogue with lib/licensed.py load() of
+# installer-template, which refuses a top-level key other than version,
+# items and notices, a version other than 1, items that are not a list
+# and notices that are not the path of a file next to the catalogue. The
+# rule is mirrored here for every catalogue of the overlay and the one of
+# the live set; with WTFBSD_TEST_INSTALLER_TEMPLATE (a checkout of the
+# pinned installer-template) the real load() reads the live set's copy.
+_lsh=$work/lic-share
+mkdir -p "$_lsh"
+tar -xzf "$LIVE" -C "$_lsh" "usr/local/share/$SLUG" 2> /dev/null
+_catrule='import json, os, re, sys
+bad = []
+for p in sys.argv[1:]:
+    try:
+        c = json.load(open(p, encoding="utf-8"))
+    except ValueError as e:
+        bad.append("%s: not JSON (%s)" % (p, e)); continue
+    if not isinstance(c, dict):
+        bad.append("%s: not an object" % p); continue
+    extra = sorted(set(c) - {"version", "items", "notices"})
+    if extra:
+        bad.append("%s: top-level keys %s" % (p, ", ".join(extra)))
+    if c.get("version") != 1 or isinstance(c.get("version"), bool):
+        bad.append("%s: version is not 1" % p)
+    if not isinstance(c.get("items"), list):
+        bad.append("%s: items is not a list" % p)
+    n = c.get("notices")
+    # an empty or false notices is no notices, as load() reads it
+    if n and not (isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", n)
+                  and ".." not in n.split("/") and "." not in n.split("/")
+                  and os.path.isfile(os.path.join(os.path.dirname(p), n))):
+        bad.append("%s: notices is not the path of a file next to the catalogue" % p)
+print("; ".join(bad))
+sys.exit(1 if bad else 0)'
+_cats=$(find "$repo/overlay" -name licensed-software.json)
+# shellcheck disable=SC2086 # one argument per catalogue; the paths have no blanks
+_catbad=$(python3 -I -c "$_catrule" $_cats "$_lsh/usr/local/share/$SLUG/licensed-software.json" 2>&1)
+if [ $? -eq 0 ] && [ -n "$_cats" ]; then
+	ok 'every licensed-software.json has only version 1, items (a list) and notices (a file next to it), as the installer reads it'
+else
+	no "every licensed-software.json has only version 1, items (a list) and notices (a file next to it), as the installer reads it ($_catbad)"
+fi
+if grep -q 'ExampleBSD' "$_lsh/usr/local/share/$SLUG/notices.txt" 2> /dev/null \
+	&& ! grep -q '@[A-Z_]*@' "$_lsh/usr/local/share/$SLUG/notices.txt"; then
+	ok 'the notices of the live set name the product, with no placeholder left'
+else
+	no 'the notices of the live set name the product, with no placeholder left'
+fi
+if [ -n "${WTFBSD_TEST_INSTALLER_TEMPLATE:-}" ] && [ -f "$WTFBSD_TEST_INSTALLER_TEMPLATE/lib/licensed.py" ]; then
+	_catload=$(python3 -I - "$WTFBSD_TEST_INSTALLER_TEMPLATE/lib" "$_lsh/usr/local/share/$SLUG/licensed-software.json" 2>&1 <<'CATLOAD'
+import sys
+sys.path.insert(0, sys.argv[1])
+import licensed
+c = licensed.load(sys.argv[2])
+print("%d items, notices %s" % (len(c["items"]), bool(c["notices"])))
+CATLOAD
+	)
+	if [ $? -eq 0 ]; then
+		ok "lib/licensed.py load() of installer-template reads the catalogue of the live set ($_catload)"
+	else
+		no "lib/licensed.py load() of installer-template reads the catalogue of the live set ($(printf '%s\n' "$_catload" | tail -n 1))"
+	fi
+else
+	printf 'SKIP  lib/licensed.py load() of installer-template reads the catalogue of the live set (set WTFBSD_TEST_INSTALLER_TEMPLATE)\n'
+fi
 cp "$_cat" "$_ishare/licensed-software.json"
+cp "$_lsh/usr/local/share/$SLUG/notices.txt" "$_ishare/notices.txt" 2> /dev/null
 _acc=$work/accept.json
 secret "$_acc" '[]'
 runinst -- -d sd1 -u wtfuser -H "$IHASH" -l "$_acc" -y --progress
