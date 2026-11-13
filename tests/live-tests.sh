@@ -1973,18 +1973,18 @@ grep -v '^ARTWORK_REF=' "$work/id-pinart.conf" > "$work/id-pinart.conf.n" && mv 
 # the published pack of the pin, from a fixture release directory: right
 # sum accepted, any other pack refused
 _rel=$work/releases
-mkdir -p "$_rel/pack-5aaea01b0829"
-cp "$work/good.tar.xz" "$_rel/pack-5aaea01b0829/examplebsd-5aaea01b0829-default.tar.xz"
+mkdir -p "$_rel/pack-ce8e9714a2b4"
+cp "$work/good.tar.xz" "$_rel/pack-ce8e9714a2b4/examplebsd-ce8e9714a2b4-default.tar.xz"
 printf "ARTWORK_RELEASES='file://%s'\n" "$_rel" >> "$work/id-pinart.conf"
 idbuild2 pinart
-if [ $? -ne 0 ] && grep -q 'the artwork pack does not match its sha256 (f0753807e81daacc3dc7b24995d49e74b1fd61152035115b37888fe814176a12)' "$work/id-pinart.log"; then
-	ok 'without ARTWORK_REF, ARTWORK_DIR or ARTWORK_PACK the build fetches the published pack of the pin (5aaea01) and refuses one that does not match the pinned sha256'
+if [ $? -ne 0 ] && grep -q 'the artwork pack does not match its sha256 (cf0b37d9a793f8f16cc78f2a82122fac28087253cc27cac384357fd6a6d85ce7)' "$work/id-pinart.log"; then
+	ok 'without ARTWORK_REF, ARTWORK_DIR or ARTWORK_PACK the build fetches the published pack of the pin (ce8e971) and refuses one that does not match the pinned sha256'
 else
-	no 'without ARTWORK_REF, ARTWORK_DIR or ARTWORK_PACK the build fetches the published pack of the pin (5aaea01) and refuses one that does not match the pinned sha256'
+	no 'without ARTWORK_REF, ARTWORK_DIR or ARTWORK_PACK the build fetches the published pack of the pin (ce8e971) and refuses one that does not match the pinned sha256'
 fi
-rm -f "$_rel/pack-5aaea01b0829/examplebsd-5aaea01b0829-default.tar.xz"
+rm -f "$_rel/pack-ce8e9714a2b4/examplebsd-ce8e9714a2b4-default.tar.xz"
 idbuild2 pinart
-if [ $? -ne 0 ] && grep -q "cannot download the pack of artwork-template 5aaea01b082938f3c6816cd5b881699e62d3d9dd (default): file://$_rel/pack-5aaea01b0829/examplebsd-5aaea01b0829-default.tar.xz" "$work/id-pinart.log"; then
+if [ $? -ne 0 ] && grep -q "cannot download the pack of artwork-template ce8e9714a2b47e3f17ff36ea647dbcc02f4399ac (default): file://$_rel/pack-ce8e9714a2b4/examplebsd-ce8e9714a2b4-default.tar.xz" "$work/id-pinart.log"; then
 	ok 'the pack URL of the pin is release pack-<commit12>, <name>-<commit12>-<variant>.tar.xz'
 else
 	no 'the pack URL of the pin is release pack-<commit12>, <name>-<commit12>-<variant>.tar.xz'
