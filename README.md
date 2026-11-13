@@ -659,7 +659,7 @@ wallpaper (`backgrounds/wallpaper.png` from the pack, or the
 sets it on each connected output (`desktop-defaults`).
 
 The artwork comes from the artwork template, pinned in `build.sh`
-(`ARTWORK_PIN`, commit ce8e971): its pre-rendered pack for the variant
+(`ARTWORK_PIN`, commit 2e86db4): its pre-rendered pack for the variant
 (release `pack-<commit12>`, `<name>-<commit12>-<variant>.tar.xz`) is
 downloaded and checked against the sha256 pinned beside it, so the build
 host needs only ImageMagick (the pack's `identity-stamp.sh` stamps the
@@ -678,7 +678,8 @@ default entry of `/etc/gettytab`, by `brand-getty`; OpenBSD has no
 Default theme's images in the pack's colours, GTK colours; given to the
 first session of an account by `desktop-defaults`, because the xfce
 packages own the files under `/etc/xdg`). The pack's panel file defines one
-panel along the top, in the format read by xfce4-panel. The pack's wallpaper helper is
+panel along the top, spanning the full width with a digital clock, in the
+format read by xfce4-panel. The pack's wallpaper helper is
 installed too: the autostart entry `/etc/xdg/autostart/<slug>-wallpaper.desktop`
 (mode 0644) and the script it runs,
 `/usr/local/share/<slug>/xfce/session/<slug>-wallpaper.sh` (mode 0755),
