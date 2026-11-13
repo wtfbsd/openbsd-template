@@ -148,13 +148,13 @@ INSTALLER_PIN=49bc24d10748c4853de98e02ea2240071bda8803
 # (libexec/<slug>/live-medium, from rc.d/<slug>_live); with yes the
 # installer offers no disk when a memory root does not name its medium.
 LIVE_MEDIUM_REQUIRED=yes
-ARTWORK_PIN=5aaea01b082938f3c6816cd5b881699e62d3d9dd
+ARTWORK_PIN=ce8e9714a2b47e3f17ff36ea647dbcc02f4399ac
 # The pre-rendered packs published for the pinned artwork commit (release
 # pack-<commit12> of the artwork template): <commit12>:<variant>:<name>:<sha256>.
 # A ref with a pack here is downloaded and checked, not rendered.
 ARTWORK_RELEASES=''
-ARTWORK_PACK_SUMS='5aaea01b0829:default:examplebsd:f0753807e81daacc3dc7b24995d49e74b1fd61152035115b37888fe814176a12
-5aaea01b0829:cyberpunk:examplebsd:3c0d23914d8282a0eed89eacb66e80b8b7dada84492d52cc2415e85621d4f470'
+ARTWORK_PACK_SUMS='ce8e9714a2b4:default:examplebsd:cf0b37d9a793f8f16cc78f2a82122fac28087253cc27cac384357fd6a6d85ce7
+ce8e9714a2b4:cyberpunk:examplebsd:fd02f48114c0e969ed92584953062da72b1923c759b0dff2701fd201cc248669'
 ARTWORK_VARIANT=''
 PRODUCT_VERSION=''
 while IFS= read -r _line || [ -n "$_line" ]; do
