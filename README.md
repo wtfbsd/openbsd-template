@@ -732,13 +732,23 @@ its firmware is installed), from `dmesg.boot` and the firmware patterns of
 
 Licensed software: the live image ships
 `/usr/local/share/<slug>/licensed-software.json`, the catalogue of the
-installer's "Additional software" page. On OpenBSD it is **empty**: the
+installer's "Additional software" page: the items whose licence needs
+acceptance or restricts use. On OpenBSD it is **empty**: the
 base system, the packages and the firmware of `fw_update(8)` are
-redistributed by the OpenBSD project without a licence that needs
-acceptance, so nothing moves out of the default install. The firmware
+redistributed by the OpenBSD project under licences that neither need
+acceptance nor restrict use, so nothing moves out of the default install. The firmware
 stays installed by default; its licence texts are the notices in
-`/etc/firmware`. `-l ACCEPTFILE` (0600 JSON) is still accepted: every id
-must be in the catalogue, and the file is kept as
+`/etc/firmware` (the `*-license` files the firmware packages install).
+The installer (`lib/licensed.py` of installer-template) reads the
+catalogue strictly: the top-level keys are `version` (1), `items` (a
+list) and `notices` only, and any other key makes it refuse the whole
+catalogue, so a remark about the catalogue goes here, never into the
+file. `notices` is the path of a text file next to the catalogue,
+`notices.txt`: the "Open-source licences" link of the page shows its
+text, which says where the licence texts are. The firmware licences are
+not in it, because `fw_update(8)` installs the firmware, and its
+`*-license` files in `/etc/firmware`, on the installed system. `-l ACCEPTFILE` (0600 JSON) is still
+accepted: every id must be in the catalogue, and the file is kept as
 `/var/db/<slug>/licenses-accepted.json`.
 
 The account is written at install time instead of by a first-boot

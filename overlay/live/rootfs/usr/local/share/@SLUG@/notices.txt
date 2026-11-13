@@ -1,0 +1,10 @@
+Open-source notices of @DISTRO_NAME@
+
+The base system, the packages and the firmware of @DISTRO_NAME@ are
+redistributed by the OpenBSD project under licences that neither need
+acceptance nor restrict use, so the Additional software page lists
+nothing.
+
+The firmware that fw_update(8) installs is installed by default. Its
+licence texts are the notices of /etc/firmware: the *-license files the
+firmware packages install there.
